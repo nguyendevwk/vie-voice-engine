@@ -131,7 +131,12 @@ python -m voice_assistant.api.server
 
 ## 🔧 Configuration
 
-Edit `voice_assistant/config.py` or use environment variables:
+Copy `.env.example` to `.env` and configure:
+
+```bash
+cp .env.example .env
+# Edit .env with your settings
+```
 
 | Variable | Description | Default |
 |----------|-------------|---------|
@@ -139,6 +144,8 @@ Edit `voice_assistant/config.py` or use environment variables:
 | `ASR_DEVICE` | ASR device (cpu/cuda) | auto |
 | `TTS_DEVICE` | TTS device | cuda:0 |
 | `DEBUG` | Enable debug logging | false |
+| `SESSION_TIMEOUT` | Session timeout (seconds) | 1800 |
+| `SESSION_PERSISTENCE` | Save sessions to disk | false |
 
 ## 📊 Latency Breakdown
 
@@ -165,28 +172,52 @@ Edit `voice_assistant/config.py` or use environment variables:
 
 - Sub-2s end-to-end latency
 - Interrupt handling for natural conversation
+- Session management with conversation history
 - Production-ready code structure
 - Comprehensive error handling & logging
 
 ## 📝 API Reference
 
+### REST Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/` | GET | Health check |
+| `/health` | GET | Detailed health status |
+| `/sessions` | GET | List active sessions |
+| `/sessions/{id}` | GET | Get session details |
+| `/sessions/{id}` | DELETE | Delete session |
+| `/sessions/{id}/clear` | POST | Clear session history |
+
 ### WebSocket Protocol
 
-**Endpoint:** `ws://localhost:8000/ws`
+**Endpoint:** `ws://localhost:8000/ws?session_id=<optional>`
+
+**Query Parameters:**
+- `session_id`: Optional. Resume existing session
 
 **Client → Server:**
 
 - Binary: PCM S16LE audio chunks (16kHz, mono, 100ms)
+- Text JSON commands:
+  ```json
+  {"type": "text", "text": "Hello"}     // Text input (skip ASR)
+  {"type": "reset"}                      // Reset conversation
+  {"type": "get_history"}                // Get conversation history
+  {"type": "get_state"}                  // Get session state
+  ```
 
 **Server → Client:**
 
 - Binary: TTS audio chunks
 - Text JSON:
-
   ```json
+  {"type": "session", "action": "connected", "session_id": "..."}
   {"type": "transcript", "text": "...", "is_final": false}
   {"type": "response", "text": "..."}
-  {"type": "control", "action": "interrupt"}
+  {"type": "control", "action": "interrupt|mic_mute|mic_unmute"}
+  {"type": "history", "messages": [...]}
+  {"type": "state", "state": "IDLE", "stats": {...}}
   ```
 
 ## 🛠️ Development

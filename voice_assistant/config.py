@@ -4,8 +4,18 @@ Simplified from production for personal/demo use.
 """
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 import os
+
+# Load .env file if exists
+try:
+    from dotenv import load_dotenv
+    env_path = Path(__file__).parent.parent / ".env"
+    if env_path.exists():
+        load_dotenv(env_path)
+except ImportError:
+    pass  # python-dotenv not installed
 
 
 @dataclass
@@ -83,6 +93,22 @@ class PipelineConfig:
 
 
 @dataclass
+class SessionConfig:
+    """Session management settings."""
+    timeout: int = 1800  # 30 minutes
+    max_history_length: int = 50
+    persistence: bool = False
+    storage_path: str = "./sessions"
+
+
+@dataclass
+class ServerConfig:
+    """Server settings."""
+    host: str = "0.0.0.0"
+    port: int = 8000
+
+
+@dataclass
 class Settings:
     """Main configuration container."""
     audio: AudioConfig = field(default_factory=AudioConfig)
@@ -91,23 +117,55 @@ class Settings:
     llm: LLMConfig = field(default_factory=LLMConfig)
     tts: TTSConfig = field(default_factory=TTSConfig)
     pipeline: PipelineConfig = field(default_factory=PipelineConfig)
+    session: SessionConfig = field(default_factory=SessionConfig)
+    server: ServerConfig = field(default_factory=ServerConfig)
 
     # Debug options
     debug: bool = field(default_factory=lambda: os.getenv("DEBUG", "").lower() == "true")
-    log_level: str = "INFO"
+    log_level: str = field(default_factory=lambda: os.getenv("LOG_LEVEL", "INFO"))
 
     @classmethod
     def from_env(cls) -> "Settings":
         """Load settings with environment variable overrides."""
         settings = cls()
+
+        # Device settings
         if os.getenv("ASR_DEVICE"):
             settings.asr.device = os.getenv("ASR_DEVICE")
         if os.getenv("TTS_DEVICE"):
             settings.tts.device = os.getenv("TTS_DEVICE")
+
+        # LLM settings
         if os.getenv("LLM_PROVIDER"):
             settings.llm.provider = os.getenv("LLM_PROVIDER")
+        if os.getenv("GROQ_API_KEY"):
+            settings.llm.api_key = os.getenv("GROQ_API_KEY")
+        if os.getenv("OPENAI_API_KEY") and settings.llm.provider == "openai":
+            settings.llm.api_key = os.getenv("OPENAI_API_KEY")
+            settings.llm.base_url = "https://api.openai.com/v1"
+
+        # Debug settings
         if os.getenv("DEBUG"):
             settings.debug = os.getenv("DEBUG", "").lower() == "true"
+        if os.getenv("LOG_LEVEL"):
+            settings.log_level = os.getenv("LOG_LEVEL")
+
+        # Server settings
+        if os.getenv("SERVER_HOST"):
+            settings.server.host = os.getenv("SERVER_HOST")
+        if os.getenv("SERVER_PORT"):
+            settings.server.port = int(os.getenv("SERVER_PORT"))
+
+        # Session settings
+        if os.getenv("SESSION_TIMEOUT"):
+            settings.session.timeout = int(os.getenv("SESSION_TIMEOUT"))
+        if os.getenv("MAX_HISTORY_LENGTH"):
+            settings.session.max_history_length = int(os.getenv("MAX_HISTORY_LENGTH"))
+        if os.getenv("SESSION_PERSISTENCE"):
+            settings.session.persistence = os.getenv("SESSION_PERSISTENCE", "").lower() == "true"
+        if os.getenv("SESSION_STORAGE_PATH"):
+            settings.session.storage_path = os.getenv("SESSION_STORAGE_PATH")
+
         return settings
 
 
