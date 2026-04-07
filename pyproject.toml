@@ -1,0 +1,113 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "voice-assistant-vie"
+version = "1.0.0"
+description = "Real-time Vietnamese Voice Assistant with ASR, LLM, and TTS streaming"
+readme = "README.md"
+license = {file = "LICENSE"}
+authors = [
+    {name = "nguyendevwk", email = "phamnguyen.devwk@gmail.com"}
+]
+maintainers = [
+    {name = "nguyendevwk", email = "phamnguyen.devwk@gmail.com"}
+]
+keywords = [
+    "voice-assistant",
+    "asr",
+    "tts",
+    "vietnamese",
+    "speech-recognition",
+    "text-to-speech",
+    "llm",
+    "streaming",
+    "real-time",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24.0",
+    "scipy>=1.10.0",
+    "torch>=2.0.0",
+    "torchaudio>=2.0.0",
+    "soundfile>=0.12.0",
+    "openai>=1.0.0",
+    "fastapi>=0.100.0",
+    "uvicorn[standard]>=0.23.0",
+    "websockets>=11.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+audio = [
+    "sounddevice>=0.4.6",
+]
+tts-fallback = [
+    "edge-tts>=6.1.0",
+]
+asr-fallback = [
+    "openai-whisper>=20230918",
+]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=23.0.0",
+    "isort>=5.12.0",
+    "mypy>=1.0.0",
+]
+all = [
+    "voice-assistant-vie[audio,tts-fallback,asr-fallback,dev]",
+]
+
+[project.urls]
+Homepage = "https://github.com/nguyendevwk/voice-assistant-vie"
+Repository = "https://github.com/nguyendevwk/voice-assistant-vie"
+Issues = "https://github.com/nguyendevwk/voice-assistant-vie/issues"
+
+[project.scripts]
+voice-assistant = "voice_assistant.cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["voice_assistant*"]
+
+[tool.black]
+line-length = 88
+target-version = ["py310", "py311", "py312"]
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.git
+    | \.venv
+    | build
+    | dist
+)/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 88
+skip_gitignore = true
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

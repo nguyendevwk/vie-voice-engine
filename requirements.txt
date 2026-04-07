@@ -1,0 +1,39 @@
+# Core
+numpy>=1.24.0
+scipy>=1.10.0
+torch>=2.0.0
+torchaudio>=2.0.0
+
+# Audio
+soundfile>=0.12.0
+sounddevice>=0.4.6
+
+# VAD
+# silero-vad (installed via torch.hub)
+
+# ASR (choose one)
+# For Gipformer: install icefall separately
+# For Whisper fallback:
+# openai-whisper>=20230918
+
+# LLM
+openai>=1.0.0
+
+# TTS (choose one)
+# For Gwen-TTS: install from source
+# For edge-tts fallback:
+edge-tts>=6.1.0
+
+# API Server
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+websockets>=11.0
+
+# Utilities
+python-dotenv>=1.0.0
+
+# Development (optional)
+# pytest>=7.0.0
+# black>=23.0.0
+# isort>=5.12.0
+# mypy>=1.0.0
