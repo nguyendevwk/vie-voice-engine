@@ -48,7 +48,7 @@ class TestVADConfig:
     def test_default_values(self):
         config = VADConfig()
 
-        assert config.threshold == 0.5
+        assert config.threshold == 0.75
         assert config.min_silence_duration_ms == 500
         assert config.speech_pad_ms == 30
         assert config.chunk_size == 512
