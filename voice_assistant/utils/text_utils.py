@@ -72,9 +72,12 @@ def remove_markdown(text: str) -> str:
     # Images
     text = re.sub(r'!\[([^\]]*)\]\([^\)]+\)', '', text)
     
-    # Lists
+    # Lists - remove bullet markers but keep text
     text = re.sub(r'^\s*[\*\+\-]\s+', '', text, flags=re.MULTILINE)
     text = re.sub(r'^\s*\d+\.\s+', '', text, flags=re.MULTILINE)
+    
+    # Also remove inline bullets at start of text
+    text = re.sub(r'^[\*\+\-]\s*', '', text.strip())
     
     # Blockquotes
     text = re.sub(r'^>\s+', '', text, flags=re.MULTILINE)
@@ -84,6 +87,42 @@ def remove_markdown(text: str) -> str:
     
     # Tables (simple removal)
     text = re.sub(r'\|.*\|', '', text)
+    
+    return text
+
+
+def prepare_for_edge_tts(text: str) -> str:
+    """
+    Prepare text specifically for edge-tts synthesis.
+    Edge-TTS is very picky about text format and fails on:
+    - Very short texts (< 10 chars)
+    - Texts with only punctuation
+    - Texts with special characters
+    - Texts without proper sentence endings
+    """
+    if not text or not text.strip():
+        return ""
+    
+    text = text.strip()
+    
+    # Remove leading bullets/markers
+    text = re.sub(r'^[\*\+\-•]\s*', '', text)
+    text = re.sub(r'^\d+[\.\)]\s*', '', text)
+    
+    # Remove markdown emphasis that might remain
+    text = re.sub(r'\*+', '', text)
+    text = re.sub(r'_+', '', text)
+    
+    # Clean up multiple spaces
+    text = re.sub(r'\s+', ' ', text).strip()
+    
+    # If text is too short, return empty
+    if len(text) < 5:
+        return ""
+    
+    # Ensure proper ending punctuation
+    if text and text[-1] not in '.!?。':
+        text += '.'
     
     return text
 

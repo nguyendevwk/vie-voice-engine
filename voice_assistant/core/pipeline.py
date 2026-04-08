@@ -276,8 +276,8 @@ class PipelineOrchestrator:
             llm_start = time.time()
             llm_timeout_reached = False
             
-            # Buffer for short sentences (edge-tts fails on short texts)
-            MIN_TTS_LENGTH = 15
+            # Buffer for short sentences (edge-tts fails on short texts < 20 chars)
+            MIN_TTS_LENGTH = 25  # Increased for better stability
             sentence_buffer = ""
             
             try:
@@ -294,6 +294,16 @@ class PipelineOrchestrator:
                     if self._should_interrupt:
                         debug_log("Pipeline interrupted")
                         break
+                    
+                    # Clean sentence - remove markdown bullets
+                    sentence = sentence.strip()
+                    if sentence.startswith('*'):
+                        sentence = sentence.lstrip('* ').strip()
+                    if sentence.startswith('-'):
+                        sentence = sentence.lstrip('- ').strip()
+                    
+                    if not sentence:
+                        continue
 
                     sentence_count += 1
                     full_response += sentence + " "

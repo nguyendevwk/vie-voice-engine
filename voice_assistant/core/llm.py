@@ -103,6 +103,8 @@ class LLMService:
         )
 
         buffer = ""
+        # Minimum sentence length for TTS (edge-tts fails on short texts)
+        MIN_SENTENCE_LENGTH = 20
 
         async for chunk in stream:
             delta = chunk.choices[0].delta
@@ -116,7 +118,7 @@ class LLMService:
                 log_llm_token(token)
                 buffer += token
 
-                # Yield when we hit a sentence delimiter
+                # Yield when we hit a sentence delimiter AND have enough text
                 for delim in self.SENTENCE_DELIMITERS:
                     if delim in token:
                         # Find last delimiter position
@@ -126,12 +128,17 @@ class LLMService:
                         )
                         if last_pos > 0:
                             sentence = buffer[:last_pos + 1].strip()
-                            buffer = buffer[last_pos + 1:].strip()
-                            if sentence:
-                                yield sentence
+                            remaining = buffer[last_pos + 1:].strip()
+                            
+                            # Only yield if sentence is long enough for TTS
+                            if len(sentence) >= MIN_SENTENCE_LENGTH:
+                                buffer = remaining
+                                if sentence:
+                                    yield sentence
+                            # Otherwise keep buffering
                         break
 
-        # Yield remaining buffer
+        # Yield remaining buffer (even if short, it's the last part)
         if buffer.strip():
             yield buffer.strip()
 

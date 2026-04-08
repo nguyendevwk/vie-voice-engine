@@ -11,7 +11,7 @@ import os
 
 from ..config import settings
 from ..utils.logging import debug_log, latency, logger
-from ..utils.text_utils import normalize_for_tts, clean_vietnamese_text, split_into_sentences
+from ..utils.text_utils import normalize_for_tts, clean_vietnamese_text, split_into_sentences, prepare_for_edge_tts
 
 
 class TTSService:
@@ -352,17 +352,12 @@ class FallbackTTS:
         if not text or not text.strip():
             return np.array([], dtype=np.float32), 16000
 
-        # Text is already normalized by TTSService.synthesize()
-        text = text.strip()
+        # Prepare text specifically for edge-tts
+        text = prepare_for_edge_tts(text)
         
-        # Edge-TTS fails with short texts (< 10 chars), need minimum length
-        if len(text) < 10:
-            logger.debug(f"Text too short for TTS: '{text}' ({len(text)} chars)")
+        if not text or len(text) < 10:
+            logger.debug(f"Text too short for edge-tts: '{text}' ({len(text)} chars)")
             return np.array([], dtype=np.float32), 16000
-        
-        # Ensure text ends with punctuation (edge-tts works better)
-        if text and text[-1] not in '.!?,;:。':
-            text += '.'
         
         # Length limit
         if len(text) > 1000:
