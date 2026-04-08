@@ -11,18 +11,17 @@ sounddevice>=0.4.6
 # VAD
 # silero-vad (installed via torch.hub)
 
-# ASR (choose one)
-# For Gipformer: install icefall separately
-# For Whisper fallback:
-# openai-whisper>=20230918
+# ASR
+# sherpa-onnx - for ONNX ASR (recommended, CPU-friendly)
+# pip install sherpa-onnx  # Optional: Add to path
 
 # LLM
 openai>=1.0.0
 
-# TTS (choose one)
-# For Gwen-TTS: install from source
-# For edge-tts fallback:
-edge-tts>=6.1.0
+# TTS - Multiple options
+edge-tts>=6.1.0             # Online fallback (free, no API key)
+# vieneu>=0.1.0             # VieNeu-TTS (CPU-friendly, offline) - recommended for limited hardware
+# qwen_tts>=0.1.0           # Qwen-TTS (GPU, high quality, voice cloning)
 
 # API Server
 fastapi>=0.100.0
@@ -31,6 +30,7 @@ websockets>=11.0
 
 # Utilities
 python-dotenv>=1.0.0
+nest-asyncio>=1.5.0         # For nested event loops
 
 # Development (optional)
 # pytest>=7.0.0

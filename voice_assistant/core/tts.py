@@ -1,444 +1,654 @@
 """
-Text-to-Speech service with Qwen-TTS and edge-tts fallback.
-Supports streaming chunk output for low latency.
+Vietnamese Text-to-Speech Service.
+
+Supports multiple backends with automatic fallback:
+1. VieNeu-TTS (Turbo) - Fast, CPU-friendly, offline
+2. Qwen-TTS - High quality, GPU, voice cloning
+3. Edge-TTS - Microsoft Azure, online fallback
+
+Usage:
+    >>> tts = get_tts_service()
+    >>> audio = await tts.synthesize("Xin chào Việt Nam")
 """
 
 import asyncio
-from typing import Optional, Tuple, AsyncIterator
+import os
+import re
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import Optional, Tuple, AsyncIterator, List, Dict, Any
 import numpy as np
 from scipy import signal
-import os
 
 from ..config import settings
 from ..utils.logging import debug_log, latency, logger
-from ..utils.text_utils import normalize_for_tts, clean_vietnamese_text, split_into_sentences, prepare_for_edge_tts
 
 
-class TTSService:
+# =============================================================================
+# Text Preprocessing
+# =============================================================================
+
+def prepare_text_for_tts(text: str) -> str:
     """
-    Vietnamese TTS using Gwen-TTS model.
+    Clean and prepare text for TTS synthesis.
+    Handles markdown, special chars, minimum length.
+    """
+    if not text or not text.strip():
+        return ""
 
-    Features:
-    - Voice cloning with reference audio
-    - Streaming chunk output
-    - Automatic resampling to pipeline sample rate
+    text = text.strip()
+
+    # Remove markdown bullets
+    text = re.sub(r'^[\*\+\-•]\s*', '', text)
+    text = re.sub(r'^\d+[\.\)]\s*', '', text)
+
+    # Remove markdown emphasis
+    text = re.sub(r'\*+', '', text)
+    text = re.sub(r'_+', '', text)
+
+    # Remove URLs
+    text = re.sub(r'https?://\S+', '', text)
+
+    # Remove Cyrillic (common LLM garbage)
+    text = re.sub(r'[а-яА-ЯёЁ]', '', text)
+
+    # Clean whitespace
+    text = re.sub(r'\s+', ' ', text).strip()
+
+    # Skip if too short
+    if len(text) < 5:
+        return ""
+
+    # Ensure ending punctuation
+    if text and text[-1] not in '.!?。':
+        text += '.'
+
+    return text
+
+
+def split_sentences(text: str, max_length: int = 150) -> List[str]:
+    """Split text into sentences for streaming TTS."""
+    if not text:
+        return []
+
+    # Split on sentence endings
+    parts = re.split(r'([.!?]+\s*)', text)
+
+    sentences = []
+    current = ""
+
+    for part in parts:
+        current += part
+        if re.search(r'[.!?]\s*$', current) and len(current.strip()) > 10:
+            sentences.append(current.strip())
+            current = ""
+
+    if current.strip():
+        sentences.append(current.strip())
+
+    # Merge short sentences
+    merged = []
+    buffer = ""
+    for s in sentences:
+        if len(buffer) + len(s) < 20:
+            buffer = (buffer + " " + s).strip() if buffer else s
+        else:
+            if buffer:
+                merged.append(buffer)
+            buffer = s
+    if buffer:
+        merged.append(buffer)
+
+    return merged
+
+
+# =============================================================================
+# Base TTS Provider
+# =============================================================================
+
+@dataclass
+class TTSResult:
+    """Result from TTS synthesis."""
+    audio: np.ndarray
+    sample_rate: int
+    duration_ms: float = 0
+
+    def to_pcm16(self) -> bytes:
+        """Convert to PCM S16LE bytes."""
+        pcm = (np.clip(self.audio, -1.0, 1.0) * 32767).astype(np.int16)
+        return pcm.tobytes()
+
+
+class BaseTTSProvider(ABC):
+    """Abstract base class for TTS providers."""
+
+    name: str = "base"
+    supports_cloning: bool = False
+    requires_gpu: bool = False
+    is_online: bool = False
+
+    @abstractmethod
+    def synthesize(self, text: str, **kwargs) -> TTSResult:
+        """Synthesize text to audio."""
+        pass
+
+    def is_available(self) -> bool:
+        """Check if provider is available."""
+        return True
+
+    def list_voices(self) -> List[str]:
+        """List available voices."""
+        return ["default"]
+
+
+# =============================================================================
+# VieNeu-TTS Provider (CPU-friendly, offline)
+# =============================================================================
+
+class VieNeuTTSProvider(BaseTTSProvider):
+    """
+    VieNeu-TTS provider for fast, CPU-friendly synthesis.
+
+    Optimized for:
+    - Low-end hardware / CPU-only
+    - Real-time applications
+    - Offline usage
+
+    Install: pip install vieneu
     """
 
-    def __init__(self, config=None):
-        cfg = config or settings.tts
-        self.model_id = cfg.model_id
-        self.device = cfg.device
-        self.output_sample_rate = cfg.output_sample_rate
-        self.target_sample_rate = cfg.target_sample_rate
-        self.default_speaker = cfg.default_speaker
-        self.use_onnx = cfg.use_onnx
-        self.speech_rate = cfg.speech_rate
-        self.streaming = cfg.streaming
-        self.backend = cfg.backend
+    name = "vieneu"
+    supports_cloning = True
+    requires_gpu = False
+    is_online = False
 
-        self._model = None
-        self._speaker_info = None
-        
-    async def synthesize_stream(self, text: str, speaker: str = None) -> AsyncIterator[bytes]:
-        """
-        Streaming TTS synthesis - yields audio chunks as they're generated.
-        
-        Args:
-            text: Text to synthesize
-            speaker: Speaker key (optional)
-            
-        Yields:
-            Audio chunks (PCM S16LE bytes)
-        """
-        # Normalize text
-        text = normalize_for_tts(text)
-        text = clean_vietnamese_text(text)
-        
-        if not text:
-            return
-        
-        # Split into sentences for streaming
-        sentences = split_into_sentences(text, max_length=150)
-        
-        # Merge short sentences to avoid edge-tts failure on short texts
-        merged_sentences = []
-        buffer = ""
-        MIN_TTS_LENGTH = 15  # Minimum characters for edge-tts
-        
-        for sentence in sentences:
-            sentence = sentence.strip()
-            if not sentence:
-                continue
-            
-            if len(buffer) + len(sentence) < MIN_TTS_LENGTH:
-                # Merge short segments
-                buffer = (buffer + " " + sentence).strip() if buffer else sentence
-            else:
-                if buffer:
-                    merged_sentences.append(buffer)
-                buffer = sentence
-        
-        # Don't forget remaining buffer
-        if buffer:
-            merged_sentences.append(buffer)
-        
-        for sentence in merged_sentences:
-            if sentence.strip():
-                audio_bytes = await self.synthesize(sentence, speaker)
-                if audio_bytes:
-                    yield audio_bytes
+    def __init__(self, voice: str = None):
+        self.voice = voice  # Preset voice ID
+        self._tts = None
+        self._voice_data = None
 
     def _ensure_loaded(self):
-        """Lazy load TTS model."""
+        """Lazy load VieNeu-TTS."""
+        if self._tts is not None:
+            return
+
+        try:
+            from vieneu import Vieneu
+
+            logger.info("Loading VieNeu-TTS (Turbo mode)...")
+            self._tts = Vieneu()  # Defaults to Turbo mode
+
+            # Get preset voice if specified
+            if self.voice:
+                try:
+                    self._voice_data = self._tts.get_preset_voice(self.voice)
+                    logger.info(f"Using VieNeu voice: {self.voice}")
+                except Exception as e:
+                    logger.warning(f"Voice '{self.voice}' not found: {e}")
+
+            logger.info("VieNeu-TTS loaded successfully")
+
+        except ImportError:
+            raise ImportError(
+                "VieNeu-TTS not installed. Install with: pip install vieneu"
+            )
+
+    def is_available(self) -> bool:
+        try:
+            import vieneu
+            return True
+        except ImportError:
+            return False
+
+    def synthesize(self, text: str, voice: str = None, **kwargs) -> TTSResult:
+        """Synthesize using VieNeu-TTS."""
+        self._ensure_loaded()
+
+        text = prepare_text_for_tts(text)
+        if not text:
+            return TTSResult(np.array([], dtype=np.float32), 24000)
+
+        # Get voice data
+        voice_data = self._voice_data
+        if voice and voice != self.voice:
+            try:
+                voice_data = self._tts.get_preset_voice(voice)
+            except:
+                pass
+
+        # Synthesize
+        with latency.track("tts_vieneu"):
+            if voice_data:
+                audio = self._tts.infer(text=text, voice=voice_data)
+            else:
+                audio = self._tts.infer(text=text)
+
+        # VieNeu outputs at 24kHz
+        return TTSResult(
+            audio=np.array(audio, dtype=np.float32),
+            sample_rate=24000,
+            duration_ms=len(audio) / 24000 * 1000
+        )
+
+    def clone_voice(self, ref_audio: str) -> Any:
+        """Clone voice from reference audio."""
+        self._ensure_loaded()
+        return self._tts.encode_voice(ref_audio)
+
+    def list_voices(self) -> List[str]:
+        """List preset voices."""
+        self._ensure_loaded()
+        try:
+            voices = self._tts.list_preset_voices()
+            return [v[1] for v in voices]  # Return voice IDs
+        except:
+            return ["default"]
+
+
+# =============================================================================
+# Qwen-TTS Provider (GPU, high quality)
+# =============================================================================
+
+class QwenTTSProvider(BaseTTSProvider):
+    """
+    Qwen-TTS provider for high-quality voice cloning.
+
+    Requires:
+    - CUDA GPU with 4-6GB+ VRAM
+    - qwen_tts package
+
+    Features:
+    - High quality synthesis
+    - Voice cloning with reference audio
+    """
+
+    name = "qwen"
+    supports_cloning = True
+    requires_gpu = True
+    is_online = False
+
+    GENERATION_CONFIG = dict(
+        temperature=0.3,
+        top_k=20,
+        top_p=0.9,
+        max_new_tokens=4096,
+        repetition_penalty=2.0,
+        subtalker_do_sample=True,
+        subtalker_temperature=0.1,
+        subtalker_top_k=20,
+        subtalker_top_p=1.0,
+    )
+
+    def __init__(
+        self,
+        model_id: str = "g-group-ai-lab/gwen-tts-0.6B",
+        device: str = "cuda:0",
+    ):
+        self.model_id = model_id
+        self.device = device
+        self._model = None
+        self._speaker_info = None
+
+    def _ensure_loaded(self):
+        """Lazy load Qwen-TTS."""
         if self._model is not None:
             return
 
-        logger.info(f"Loading TTS model: {self.model_id}")
+        import torch
+        from qwen_tts import Qwen3TTSModel
 
-        # Check backend preference
-        cfg = settings.tts
-        if cfg.backend == "edge-tts":
-            logger.info("Using edge-tts (TTS_BACKEND=edge-tts)")
-            self._model = FallbackTTS(speech_rate=self.speech_rate)
-            return
+        logger.info(f"Loading Qwen-TTS: {self.model_id}")
 
-        # Try Qwen-TTS (gwen-tts)
+        # Check attention implementation
         try:
-            logger.info("Attempting to load Qwen-TTS...")
-            from qwen_tts import Qwen3TTSModel
-            import torch
-            
-            # Setup HF token
-            hf_token = os.getenv("HF_HUB_TOKEN")
-            if hf_token:
-                os.environ["HF_TOKEN"] = hf_token
+            import flash_attn
+            attn_impl = "flash_attention_2"
+        except ImportError:
+            attn_impl = "sdpa"
 
-            # Check for flash attention
-            try:
-                import flash_attn
-                attn_impl = "flash_attention_2"
-                debug_log("Using Flash Attention 2")
-            except ImportError:
-                attn_impl = "sdpa"
-                debug_log("Using SDPA attention (flash-attn not available)")
+        self._model = Qwen3TTSModel.from_pretrained(
+            self.model_id,
+            device_map=self.device,
+            dtype=torch.bfloat16,
+            attn_implementation=attn_impl,
+        )
 
-            self._model = Qwen3TTSModel.from_pretrained(
-                self.model_id,
-                device_map=self.device,
-                dtype=torch.bfloat16,
-                attn_implementation=attn_impl,
-            )
-
-            # Load speaker info
-            self._load_speaker_info()
-
-            logger.info("Qwen-TTS PyTorch model loaded successfully")
-            return
-
-        except Exception as e:
-            logger.warning(f"Qwen-TTS failed to load: {e}")
-            logger.warning("Falling back to edge-tts")
-            self._model = FallbackTTS(speech_rate=self.speech_rate)
+        self._load_speaker_info()
+        logger.info("Qwen-TTS loaded successfully")
 
     def _load_speaker_info(self):
         """Load reference speaker information."""
-        if self._speaker_info is not None:
-            return
-
         import json
         from pathlib import Path
 
-        # Try to find ref_info.json
         data_dir = Path(__file__).parent.parent / "data"
-        ref_paths = [
-            data_dir / "ref_info.json",
-            Path(__file__).parent.parent.parent / "inferances_demo" / "tts" / "data" / "ref_info.json",
-            Path.home() / ".cache" / "gwen-tts" / "ref_info.json",
-        ]
-        
-        ref_info_path = None
-        for path in ref_paths:
-            if path.exists():
-                ref_info_path = path
-                with open(path, "r", encoding="utf-8") as f:
-                    self._speaker_info = json.load(f)
-                debug_log(f"Loaded speaker info from {path}")
-                break
+        ref_path = data_dir / "ref_info.json"
 
-        if not self._speaker_info:
-            # Create default speaker info if not found
-            logger.warning("No speaker info found, creating default")
-            self._speaker_info = {
-                "default": {
-                    "name": "Default Voice",
-                    "text": "Xin chào, tôi là trợ lý ảo thông minh.",
-                    "audio_path": None,
-                }
-            }
-            return
-        
-        # Resolve relative audio paths
-        base_dir = ref_info_path.parent.parent if ref_info_path else data_dir.parent
-        
-        for speaker_key, speaker_data in self._speaker_info.items():
-            if isinstance(speaker_data, dict) and "audio_path" in speaker_data:
-                audio_path = speaker_data.get("audio_path")
-                if audio_path and not os.path.isabs(audio_path):
-                    # Resolve relative path from voice_assistant directory
-                    resolved_path = base_dir / audio_path
-                    if resolved_path.exists():
-                        speaker_data["audio_path"] = str(resolved_path)
-                        debug_log(f"Resolved audio path for {speaker_key}: {resolved_path}")
-                    else:
-                        # Try from data directory directly
-                        alt_path = data_dir / Path(audio_path).name
-                        if not alt_path.exists():
-                            # Try ref_audio subdirectory
-                            alt_path = data_dir / "ref_audio" / Path(audio_path).name
-                        if alt_path.exists():
-                            speaker_data["audio_path"] = str(alt_path)
-                            debug_log(f"Resolved audio path for {speaker_key}: {alt_path}")
-                        else:
-                            logger.warning(f"Audio file not found for {speaker_key}: {audio_path}")
-        
-        valid_speakers = [k for k, v in self._speaker_info.items() 
-                         if isinstance(v, dict) and v.get("audio_path") and os.path.exists(v.get("audio_path", ""))]
-        logger.info(f"Available speakers: {', '.join(valid_speakers)}")
+        if ref_path.exists():
+            with open(ref_path, "r", encoding="utf-8") as f:
+                self._speaker_info = json.load(f)
 
-    async def synthesize(self, text: str, speaker: str = None) -> bytes:
-        """
-        Synthesize text to speech.
+            # Resolve relative audio paths
+            for key, data in self._speaker_info.items():
+                if isinstance(data, dict) and "audio_path" in data:
+                    audio_path = data.get("audio_path")
+                    if audio_path and not os.path.isabs(audio_path):
+                        resolved = data_dir.parent / audio_path
+                        if resolved.exists():
+                            data["audio_path"] = str(resolved)
 
-        Args:
-            text: Text to synthesize
-            speaker: Speaker key (optional)
+            valid = [k for k, v in self._speaker_info.items()
+                    if isinstance(v, dict) and v.get("audio_path") and os.path.exists(v.get("audio_path", ""))]
+            logger.info(f"Available Qwen speakers: {', '.join(valid)}")
+        else:
+            self._speaker_info = {}
 
-        Returns:
-            PCM S16LE audio bytes at target sample rate
-        """
-        # Normalize text before synthesis
-        text = normalize_for_tts(text)
-        text = clean_vietnamese_text(text)
-        
-        if not text:
-            return b""
-        
-        return await asyncio.to_thread(self._synthesize_sync, text, speaker)
+    def is_available(self) -> bool:
+        try:
+            import torch
+            import qwen_tts
+            return torch.cuda.is_available()
+        except ImportError:
+            return False
 
-    def _synthesize_sync(self, text: str, speaker: str = None) -> bytes:
-        """Synchronous TTS synthesis."""
+    def synthesize(self, text: str, speaker: str = None, **kwargs) -> TTSResult:
+        """Synthesize using Qwen-TTS with voice cloning."""
         self._ensure_loaded()
 
-        if not text.strip():
-            return b""
+        text = prepare_text_for_tts(text)
+        if not text:
+            return TTSResult(np.array([], dtype=np.float32), 24000)
 
-        speaker = speaker or self.default_speaker
+        # Get reference audio for voice cloning
+        ref_audio = kwargs.get("ref_audio")
+        ref_text = kwargs.get("ref_text")
 
-        with latency.track("tts_synthesize"):
-            if isinstance(self._model, FallbackTTS):
-                audio, sr = self._model.synthesize(text)
+        if not ref_audio and speaker and self._speaker_info:
+            if speaker in self._speaker_info:
+                data = self._speaker_info[speaker]
+                ref_audio = data.get("audio_path")
+                ref_text = data.get("text")
+
+        # Synthesize
+        with latency.track("tts_qwen"):
+            if ref_audio and ref_text and os.path.exists(ref_audio):
+                wavs, sr = self._model.generate_voice_clone(
+                    text=text,
+                    ref_audio=ref_audio,
+                    ref_text=ref_text,
+                    **self.GENERATION_CONFIG,
+                )
             else:
-                try:
-                    audio, sr = self._synthesize_gwen(text, speaker)
-                except (ValueError, FileNotFoundError) as e:
-                    # Fall back to edge-tts if Gwen-TTS fails (missing ref audio, etc.)
-                    logger.warning(f"Gwen-TTS failed ({e}), falling back to edge-tts")
-                    if not isinstance(self._model, FallbackTTS):
-                        self._model = FallbackTTS()
-                    audio, sr = self._model.synthesize(text)
+                raise ValueError("Qwen-TTS requires reference audio for voice cloning")
 
-        # Resample if needed
-        if sr != self.target_sample_rate:
-            audio = self._resample(audio, sr, self.target_sample_rate)
-
-        # Convert to PCM S16LE
-        pcm = (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16)
-
-        return pcm.tobytes()
-
-    def _synthesize_gwen(self, text: str, speaker: str) -> Tuple[np.ndarray, int]:
-        """Synthesize using Gwen-TTS (Qwen3TTS)."""
-        self._load_speaker_info()
-
-        # Generation config (optimized for Vietnamese)
-        gen_config = dict(
-            temperature=0.3,
-            top_k=20,
-            top_p=0.9,
-            max_new_tokens=4096,
-            repetition_penalty=2.0,
-            subtalker_do_sample=True,
-            subtalker_temperature=0.1,
-            subtalker_top_k=20,
-            subtalker_top_p=1.0,
+        return TTSResult(
+            audio=wavs[0].astype(np.float32),
+            sample_rate=sr,
+            duration_ms=len(wavs[0]) / sr * 1000
         )
 
-        # Qwen3TTSModel requires reference audio for voice cloning
-        ref_audio = None
-        ref_text = None
-        
-        if speaker in self._speaker_info:
-            speaker_data = self._speaker_info[speaker]
-            ref_audio = speaker_data.get("audio_path")
-            ref_text = speaker_data.get("text")
-        
-        # If no reference audio, use default or first available
-        if not ref_audio:
-            if self._speaker_info:
-                # Use first available speaker with valid audio
-                for key, speaker_data in self._speaker_info.items():
-                    if key.startswith("_"):  # Skip metadata entries
-                        continue
-                    audio_path = speaker_data.get("audio_path")
-                    if audio_path and os.path.exists(audio_path):
-                        ref_audio = audio_path
-                        ref_text = speaker_data.get("text")
-                        logger.info(f"Using speaker: {key}")
-                        break
-            
-        # If still no valid reference, raise error to trigger fallback
-        if not ref_audio or not ref_text:
-            raise ValueError("No reference audio available - Qwen-TTS requires reference audio for voice cloning")
-        
-        # Check if reference audio file exists
-        if not os.path.exists(ref_audio):
-            raise FileNotFoundError(f"Reference audio not found: {ref_audio}")
-
-        # Voice cloning with reference
-        wavs, sr = self._model.generate_voice_clone(
-            text=text,
-            ref_audio=ref_audio,
-            ref_text=ref_text,
-            **gen_config,
-        )
-
-        return wavs[0], sr
-
-    def _resample(
-        self,
-        audio: np.ndarray,
-        src_rate: int,
-        dst_rate: int,
-    ) -> np.ndarray:
-        """Resample audio to target sample rate."""
-        if src_rate == dst_rate:
-            return audio
-
-        num_samples = int(len(audio) * dst_rate / src_rate)
-        return signal.resample(audio, num_samples)
-
-    def get_audio_duration_ms(self, audio_bytes: bytes) -> float:
-        """Calculate audio duration from PCM bytes."""
-        # bytes / 2 (16-bit) / sample_rate * 1000
-        return len(audio_bytes) / 2 / self.target_sample_rate * 1000
+    def list_voices(self) -> List[str]:
+        """List available speakers."""
+        self._ensure_loaded()
+        return [k for k in self._speaker_info.keys() if not k.startswith("_")]
 
 
-class FallbackTTS:
-    """Fallback TTS using edge-tts (Microsoft Azure TTS)."""
+# =============================================================================
+# Edge-TTS Provider (Online fallback)
+# =============================================================================
 
-    def __init__(self, speech_rate: float = 1.5):
-        # Try male voice for better stability
-        self.voice = "vi-VN-NamMinhNeural"  # Male voice, more stable
-        self.speech_rate = max(1.0, min(speech_rate, 1.5))  # Limit to 1.0-1.5x (edge-tts can be unstable at 2x)
-        self._edge_tts = None
+class EdgeTTSProvider(BaseTTSProvider):
+    """
+    Edge-TTS provider using Microsoft Azure TTS.
 
-    def synthesize(self, text: str) -> Tuple[np.ndarray, int]:
+    Features:
+    - Free, no API key needed
+    - Good quality Vietnamese voices
+    - Online only
+
+    Install: pip install edge-tts
+    """
+
+    name = "edge"
+    supports_cloning = False
+    requires_gpu = False
+    is_online = True
+
+    # Vietnamese voices
+    VOICES = {
+        "male": "vi-VN-NamMinhNeural",
+        "female": "vi-VN-HoaiMyNeural",
+    }
+
+    def __init__(self, voice: str = "male", speech_rate: float = 1.0):
+        self.voice = self.VOICES.get(voice, voice)
+        self.speech_rate = max(1.0, min(speech_rate, 1.25))  # Limit for stability
+
+    def is_available(self) -> bool:
+        try:
+            import edge_tts
+            return True
+        except ImportError:
+            return False
+
+    def synthesize(self, text: str, **kwargs) -> TTSResult:
         """Synthesize using edge-tts."""
         import io
         import asyncio
         import edge_tts
         import soundfile as sf
 
-        if not text or not text.strip():
-            return np.array([], dtype=np.float32), 16000
-
-        # Prepare text specifically for edge-tts
-        text = prepare_for_edge_tts(text)
-        
+        text = prepare_text_for_tts(text)
         if not text or len(text) < 10:
-            logger.debug(f"Text too short for edge-tts: '{text}' ({len(text)} chars)")
-            return np.array([], dtype=np.float32), 16000
-        
-        # Length limit
-        if len(text) > 1000:
-            text = text[:1000]
-        
-        logger.debug(f"Edge-TTS synthesizing: '{text[:50]}...' ({len(text)} chars)")
+            return TTSResult(np.array([], dtype=np.float32), 16000)
 
-        # Calculate rate parameter for edge-tts
-        # Limit to +25% for stability (HoaiMyNeural fails at +50%)
-        rate_percent = int((min(self.speech_rate, 1.25) - 1.0) * 100)
+        # Calculate rate
+        rate_percent = int((self.speech_rate - 1.0) * 100)
         rate_str = f"+{rate_percent}%" if rate_percent > 0 else "+0%"
 
         async def _synthesize():
             try:
                 communicate = edge_tts.Communicate(
                     text=text,
-                    voice=self.voice,
+                    voice=kwargs.get("voice", self.voice),
                     rate=rate_str,
                 )
                 audio_data = b""
                 async for chunk in communicate.stream():
                     if chunk["type"] == "audio":
                         audio_data += chunk["data"]
-                
-                # Retry with slower rate if failed
-                if not audio_data and rate_percent > 0:
-                    logger.warning(f"Retrying with slower rate (+0%)")
-                    communicate = edge_tts.Communicate(
-                        text=text,
-                        voice=self.voice,
-                        rate="+0%",
-                    )
-                    async for chunk in communicate.stream():
-                        if chunk["type"] == "audio":
-                            audio_data += chunk["data"]
-                
-                if not audio_data:
-                    logger.warning(f"Edge-TTS returned empty audio for: '{text[:50]}'")
-                
                 return audio_data
             except Exception as e:
-                logger.error(f"Edge-TTS synthesis error for text '{text[:50]}': {e}")
-                # Try one more time with default parameters
-                try:
-                    logger.info("Retrying with default parameters...")
-                    communicate = edge_tts.Communicate(text=text, voice=self.voice)
-                    audio_data = b""
-                    async for chunk in communicate.stream():
-                        if chunk["type"] == "audio":
-                            audio_data += chunk["data"]
-                    return audio_data
-                except:
-                    return b""
+                logger.error(f"Edge-TTS error: {e}")
+                return b""
 
-        # Run async in sync context
+        # Run async
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
-                # Already in async context, create new loop
                 import nest_asyncio
                 nest_asyncio.apply()
         except RuntimeError:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
 
-        audio_bytes = loop.run_until_complete(_synthesize())
-        
+        with latency.track("tts_edge"):
+            audio_bytes = loop.run_until_complete(_synthesize())
+
         if not audio_bytes:
-            logger.warning("edge-tts returned empty audio")
-            return np.array([], dtype=np.float32), 16000
+            return TTSResult(np.array([], dtype=np.float32), 16000)
 
-        # Decode audio
+        # Decode
         audio, sr = sf.read(io.BytesIO(audio_bytes))
-
         if audio.ndim > 1:
             audio = audio.mean(axis=1)
 
-        return audio.astype(np.float32), sr
+        return TTSResult(
+            audio=audio.astype(np.float32),
+            sample_rate=sr,
+            duration_ms=len(audio) / sr * 1000
+        )
+
+    def list_voices(self) -> List[str]:
+        return list(self.VOICES.keys())
 
 
-# Lazy singleton
+# =============================================================================
+# Main TTS Service (with fallback chain)
+# =============================================================================
+
+class TTSService:
+    """
+    Main TTS service with automatic provider selection and fallback.
+
+    Provider priority:
+    1. VieNeu-TTS (if installed, CPU-friendly)
+    2. Qwen-TTS (if GPU available)
+    3. Edge-TTS (online fallback)
+
+    Usage:
+        >>> tts = TTSService()
+        >>> audio = await tts.synthesize("Xin chào")
+        >>> # Or with specific provider
+        >>> tts = TTSService(backend="vieneu")
+    """
+
+    def __init__(
+        self,
+        backend: str = "auto",  # auto, vieneu, qwen, edge
+        default_speaker: str = None,
+        speech_rate: float = 1.0,
+        target_sample_rate: int = 16000,
+    ):
+        self.backend = backend
+        self.default_speaker = default_speaker or settings.tts.default_speaker
+        self.speech_rate = speech_rate
+        self.target_sample_rate = target_sample_rate
+
+        self._provider: Optional[BaseTTSProvider] = None
+        self._fallback: Optional[BaseTTSProvider] = None
+
+    def _get_provider(self) -> BaseTTSProvider:
+        """Get or create TTS provider."""
+        if self._provider is not None:
+            return self._provider
+
+        backend = self.backend if self.backend != "auto" else settings.tts.backend
+
+        # Try requested backend
+        if backend == "vieneu":
+            provider = VieNeuTTSProvider()
+            if provider.is_available():
+                self._provider = provider
+                logger.info("Using VieNeu-TTS")
+                return self._provider
+
+        elif backend == "qwen":
+            provider = QwenTTSProvider()
+            if provider.is_available():
+                self._provider = provider
+                logger.info("Using Qwen-TTS")
+                return self._provider
+
+        elif backend == "edge":
+            self._provider = EdgeTTSProvider(speech_rate=self.speech_rate)
+            logger.info("Using Edge-TTS")
+            return self._provider
+
+        # Auto mode: try providers in order
+        if backend == "auto":
+            # 1. VieNeu-TTS (CPU-friendly)
+            vieneu = VieNeuTTSProvider()
+            if vieneu.is_available():
+                self._provider = vieneu
+                self._fallback = EdgeTTSProvider(speech_rate=self.speech_rate)
+                logger.info("Using VieNeu-TTS (auto)")
+                return self._provider
+
+            # 2. Qwen-TTS (GPU)
+            qwen = QwenTTSProvider()
+            if qwen.is_available():
+                self._provider = qwen
+                self._fallback = EdgeTTSProvider(speech_rate=self.speech_rate)
+                logger.info("Using Qwen-TTS (auto)")
+                return self._provider
+
+        # 3. Edge-TTS fallback
+        self._provider = EdgeTTSProvider(speech_rate=self.speech_rate)
+        logger.info("Using Edge-TTS (fallback)")
+        return self._provider
+
+    async def synthesize(self, text: str, speaker: str = None) -> bytes:
+        """
+        Synthesize text to PCM audio bytes.
+
+        Args:
+            text: Text to synthesize
+            speaker: Speaker/voice ID (optional)
+
+        Returns:
+            PCM S16LE audio bytes at target sample rate
+        """
+        provider = self._get_provider()
+        speaker = speaker or self.default_speaker
+
+        try:
+            result = await asyncio.to_thread(
+                provider.synthesize, text, speaker=speaker
+            )
+        except Exception as e:
+            logger.warning(f"{provider.name} failed: {e}")
+
+            # Try fallback
+            if self._fallback:
+                logger.info(f"Falling back to {self._fallback.name}")
+                result = await asyncio.to_thread(
+                    self._fallback.synthesize, text
+                )
+            else:
+                return b""
+
+        if result.audio.size == 0:
+            return b""
+
+        # Resample if needed
+        audio = result.audio
+        if result.sample_rate != self.target_sample_rate:
+            audio = self._resample(audio, result.sample_rate, self.target_sample_rate)
+
+        # Convert to PCM
+        pcm = (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16)
+        return pcm.tobytes()
+
+    async def synthesize_stream(self, text: str, speaker: str = None) -> AsyncIterator[bytes]:
+        """Stream TTS synthesis sentence by sentence."""
+        sentences = split_sentences(text)
+
+        for sentence in sentences:
+            audio = await self.synthesize(sentence, speaker)
+            if audio:
+                yield audio
+
+    def _resample(self, audio: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
+        """Resample audio."""
+        if src_rate == dst_rate:
+            return audio
+        num_samples = int(len(audio) * dst_rate / src_rate)
+        return signal.resample(audio, num_samples)
+
+    def get_audio_duration_ms(self, audio_bytes: bytes) -> float:
+        """Calculate audio duration from PCM bytes."""
+        return len(audio_bytes) / 2 / self.target_sample_rate * 1000
+
+    def list_voices(self) -> List[str]:
+        """List available voices for current provider."""
+        return self._get_provider().list_voices()
+
+
+# =============================================================================
+# Singleton
+# =============================================================================
+
 _tts_service: Optional[TTSService] = None
 
 
@@ -446,5 +656,10 @@ def get_tts_service() -> TTSService:
     """Get or create TTS service singleton."""
     global _tts_service
     if _tts_service is None:
-        _tts_service = TTSService()
+        _tts_service = TTSService(
+            backend=settings.tts.backend,
+            default_speaker=settings.tts.default_speaker,
+            speech_rate=settings.tts.speech_rate,
+            target_sample_rate=settings.tts.target_sample_rate,
+        )
     return _tts_service

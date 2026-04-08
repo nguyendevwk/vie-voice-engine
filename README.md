@@ -12,7 +12,7 @@
 
 - 🎤 **Real-time Speech Recognition** - Gipformer ASR with streaming support
 - 🧠 **LLM Integration** - Groq/OpenAI with token streaming
-- 🗣️ **Voice Synthesis** - Qwen-TTS with voice cloning or Edge-TTS fallback
+- 🗣️ **Voice Synthesis** - VieNeu-TTS (CPU) / Qwen-TTS (GPU) / Edge-TTS fallback
 - 👂 **Voice Activity Detection** - Silero VAD for speech start/end
 - ⚡ **Low Latency** - <3s first response, async throughout
 - 🔄 **Interrupt Support** - Can interrupt assistant while speaking
@@ -21,7 +21,7 @@
 ### Technical Highlights
 
 - 🔧 **Modular Architecture** - Easy to extend and customize
-- 🚀 **Multiple Backends** - ONNX/PyTorch for ASR, Qwen/Edge-TTS for TTS
+- 🚀 **Multiple Backends** - ONNX/PyTorch for ASR, VieNeu/Qwen/Edge-TTS for TTS
 - 📊 **Audio Preprocessing** - Comprehensive normalization pipeline
 - 🌐 **Web UI** - Modern dark theme with real-time visualizer
 - 🖥️ **CLI Interface** - Command-line mode for testing
@@ -38,8 +38,8 @@
 │                                                                  │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐       │
 │  │   VAD    │→ │   ASR    │→ │   LLM    │→ │   TTS    │       │
-│  │ Silero   │  │Gipformer │  │  Groq    │  │ Qwen-TTS │       │
-│  │  Model   │  │ ONNX/PT  │  │ Stream   │  │ +Edge-TTS│       │
+│  │ Silero   │  │Gipformer │  │  Groq    │  │VieNeu/  │       │
+│  │  Model   │  │ ONNX/PT  │  │ Stream   │  │Qwen/Edge│       │
 │  └──────────┘  └──────────┘  └──────────┘  └──────────┘       │
 │       ↓            ↓             ↓              ↓               │
 │  Speech Start  Vietnamese   AI Response   Audio Chunks         │
@@ -201,10 +201,10 @@ asyncio.run(main())
 | `ASR_USE_ONNX` | `true` | Use ONNX backend |
 | `ASR_USE_PYTORCH_CUDA` | `false` | Use PyTorch CUDA |
 | **TTS** | | |
-| `TTS_BACKEND` | `auto` | Backend (auto/qwen/edge-tts) |
-| `TTS_SPEECH_RATE` | `1.25` | Speech speed (1.0-2.0) |
+| `TTS_BACKEND` | `auto` | Backend (auto/vieneu/qwen/edge) |
+| `TTS_SPEECH_RATE` | `1.25` | Speech speed (1.0-1.25) |
 | `TTS_DEVICE` | `cuda` | TTS device |
-| `TTS_EDGE_VOICE` | `vi-VN-NamMinhNeural` | Edge-TTS voice |
+| `TTS_DEFAULT_SPEAKER` | `yen_nhi` | Voice cloning speaker |
 | **Pipeline** | | |
 | `PIPELINE_ASR_TIMEOUT` | `10` | ASR timeout (seconds) |
 | `PIPELINE_LLM_TIMEOUT` | `30` | LLM timeout (seconds) |
@@ -224,8 +224,12 @@ asyncio.run(main())
 
 #### TTS Backends
 
-1. **Qwen-TTS** - Best quality, voice cloning, GPU required
-2. **Edge-TTS** - Reliable fallback, Microsoft Azure
+1. **VieNeu-TTS** (Recommended for limited hardware) - Fast, CPU-friendly, offline
+   - Install: `pip install vieneu`
+   - Best for: CPU-only, edge devices, real-time
+2. **Qwen-TTS** - Best quality, voice cloning, GPU required (4-6GB VRAM)
+   - Best for: High quality, voice cloning
+3. **Edge-TTS** - Reliable online fallback, Microsoft Azure (free)
 
 ## 📚 API Documentation
 

@@ -77,15 +77,17 @@ class LLMConfig:
 @dataclass
 class TTSConfig:
     """Text-to-Speech settings."""
+    backend: str = "auto"  # auto, vieneu, qwen, edge
+    default_speaker: str = "yen_nhi"
+    target_sample_rate: int = 16000
+    speech_rate: float = 1.25  # Speed multiplier (1.0 = normal, max 1.25 for edge-tts)
+    # Qwen-TTS specific (requires GPU)
+    qwen_model_id: str = "g-group-ai-lab/gwen-tts-0.6B"
+    qwen_device: str = "cuda:0"
+    # Legacy compatibility
     model_id: str = "g-group-ai-lab/gwen-tts-0.6B"
     device: str = "cuda:0"
     output_sample_rate: int = 24000
-    target_sample_rate: int = 16000
-    default_speaker: str = "yen_nhi"
-    backend: str = "auto"  # auto, gwen, edge-tts
-    use_onnx: bool = True  # Use ONNX runtime for faster inference
-    speech_rate: float = 1.5  # Speed multiplier (1.0 = normal, 1.5 = faster, 2.0 = very fast)
-    streaming: bool = True  # Enable streaming TTS output
 
 
 @dataclass
@@ -149,10 +151,8 @@ class Settings:
             settings.tts.backend = os.getenv("TTS_BACKEND")
         if os.getenv("TTS_SPEECH_RATE"):
             settings.tts.speech_rate = float(os.getenv("TTS_SPEECH_RATE"))
-        if os.getenv("TTS_USE_ONNX"):
-            settings.tts.use_onnx = os.getenv("TTS_USE_ONNX", "").lower() == "true"
-        if os.getenv("TTS_STREAMING"):
-            settings.tts.streaming = os.getenv("TTS_STREAMING", "").lower() == "true"
+        if os.getenv("TTS_DEFAULT_SPEAKER"):
+            settings.tts.default_speaker = os.getenv("TTS_DEFAULT_SPEAKER")
 
         # LLM settings
         if os.getenv("LLM_PROVIDER"):
