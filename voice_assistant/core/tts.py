@@ -149,29 +149,61 @@ class TTSService:
         from pathlib import Path
 
         # Try to find ref_info.json
+        data_dir = Path(__file__).parent.parent / "data"
         ref_paths = [
-            Path(__file__).parent.parent / "data" / "ref_info.json",
+            data_dir / "ref_info.json",
             Path(__file__).parent.parent.parent / "inferances_demo" / "tts" / "data" / "ref_info.json",
             Path.home() / ".cache" / "gwen-tts" / "ref_info.json",
         ]
-
+        
+        ref_info_path = None
         for path in ref_paths:
             if path.exists():
+                ref_info_path = path
                 with open(path, "r", encoding="utf-8") as f:
                     self._speaker_info = json.load(f)
                 debug_log(f"Loaded speaker info from {path}")
-                logger.info(f"Available speakers: {', '.join(self._speaker_info.keys())}")
-                return
+                break
 
-        # Create default speaker info if not found
-        logger.warning("No speaker info found, creating default")
-        self._speaker_info = {
-            "default": {
-                "name": "Default Voice",
-                "text": "Xin chào, tôi là trợ lý ảo thông minh.",
-                "audio_path": None,  # Will use model defaults
+        if not self._speaker_info:
+            # Create default speaker info if not found
+            logger.warning("No speaker info found, creating default")
+            self._speaker_info = {
+                "default": {
+                    "name": "Default Voice",
+                    "text": "Xin chào, tôi là trợ lý ảo thông minh.",
+                    "audio_path": None,
+                }
             }
-        }
+            return
+        
+        # Resolve relative audio paths
+        base_dir = ref_info_path.parent.parent if ref_info_path else data_dir.parent
+        
+        for speaker_key, speaker_data in self._speaker_info.items():
+            if isinstance(speaker_data, dict) and "audio_path" in speaker_data:
+                audio_path = speaker_data.get("audio_path")
+                if audio_path and not os.path.isabs(audio_path):
+                    # Resolve relative path from voice_assistant directory
+                    resolved_path = base_dir / audio_path
+                    if resolved_path.exists():
+                        speaker_data["audio_path"] = str(resolved_path)
+                        debug_log(f"Resolved audio path for {speaker_key}: {resolved_path}")
+                    else:
+                        # Try from data directory directly
+                        alt_path = data_dir / Path(audio_path).name
+                        if not alt_path.exists():
+                            # Try ref_audio subdirectory
+                            alt_path = data_dir / "ref_audio" / Path(audio_path).name
+                        if alt_path.exists():
+                            speaker_data["audio_path"] = str(alt_path)
+                            debug_log(f"Resolved audio path for {speaker_key}: {alt_path}")
+                        else:
+                            logger.warning(f"Audio file not found for {speaker_key}: {audio_path}")
+        
+        valid_speakers = [k for k, v in self._speaker_info.items() 
+                         if isinstance(v, dict) and v.get("audio_path") and os.path.exists(v.get("audio_path", ""))]
+        logger.info(f"Available speakers: {', '.join(valid_speakers)}")
 
     async def synthesize(self, text: str, speaker: str = None) -> bytes:
         """
