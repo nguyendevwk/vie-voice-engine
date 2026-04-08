@@ -1,61 +1,47 @@
-"""Core components for Voice Assistant."""
+"""
+Core components for the voice assistant pipeline.
 
-from .audio import AudioPreprocessor, preprocessor
-from .vad import VADService, VADResult, get_vad_service
-from .asr import ASRService, StreamingASRService, TranscriptUpdate, get_asr_service
-from .llm import LLMService, Message, get_llm_service
+This module contains the main processing components:
+    - ASR: Automatic Speech Recognition
+    - LLM: Large Language Model integration
+    - TTS: Text-to-Speech synthesis
+    - VAD: Voice Activity Detection
+    - Pipeline: Orchestration and state management
+    - Session: Conversation management
+    - Audio: Preprocessing utilities
+
+All components are designed for async operation with streaming support.
+"""
+
+from .asr import ASRService, get_asr_service
+from .llm import LLMService, get_llm_service
 from .tts import TTSService, get_tts_service
-from .pipeline import PipelineOrchestrator, PipelineState, PipelineEvent, get_orchestrator
-from .session import (
-    Session,
-    SessionManager,
-    SessionStats,
-    ConversationState,
-    get_session_manager,
-)
-from .streaming import (
-    StreamingPipeline,
-    StreamState,
-    StreamMetrics,
-    RealtimeASRProcessor,
-    RealtimeTTSProcessor,
-)
+from .vad import VADService, get_vad_service
+from .pipeline import PipelineOrchestrator, PipelineEvent, PipelineState
+from .session import Session, SessionManager, ConversationState
+from .audio import AudioPreprocessor, AudioNormalizer, NoiseReducer
 
 __all__ = [
-    # Audio
-    "AudioPreprocessor",
-    "preprocessor",
-    # VAD
-    "VADService",
-    "VADResult",
-    "get_vad_service",
-    # ASR
+    # Services
     "ASRService",
-    "StreamingASRService",
-    "TranscriptUpdate",
-    "get_asr_service",
-    "RealtimeASRProcessor",
-    # LLM
     "LLMService",
-    "Message",
-    "get_llm_service",
-    # TTS
     "TTSService",
+    "VADService",
+    # Singletons
+    "get_asr_service",
+    "get_llm_service",
     "get_tts_service",
-    "RealtimeTTSProcessor",
+    "get_vad_service",
     # Pipeline
     "PipelineOrchestrator",
-    "PipelineState",
     "PipelineEvent",
-    "get_orchestrator",
-    # Streaming
-    "StreamingPipeline",
-    "StreamState",
-    "StreamMetrics",
+    "PipelineState",
     # Session
     "Session",
     "SessionManager",
-    "SessionStats",
     "ConversationState",
-    "get_session_manager",
+    # Audio
+    "AudioPreprocessor",
+    "AudioNormalizer",
+    "NoiseReducer",
 ]

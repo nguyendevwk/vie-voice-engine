@@ -1,15 +1,17 @@
 """
-Text-to-Speech service using Gwen-TTS.
-Supports streaming chunk output.
+Text-to-Speech service with Qwen-TTS and edge-tts fallback.
+Supports streaming chunk output for low latency.
 """
 
 import asyncio
-from typing import Optional, Tuple
+from typing import Optional, Tuple, AsyncIterator
 import numpy as np
 from scipy import signal
+import os
 
 from ..config import settings
 from ..utils.logging import debug_log, latency, logger
+from ..utils.text_utils import normalize_for_tts, clean_vietnamese_text, split_into_sentences
 
 
 class TTSService:
@@ -29,9 +31,40 @@ class TTSService:
         self.output_sample_rate = cfg.output_sample_rate
         self.target_sample_rate = cfg.target_sample_rate
         self.default_speaker = cfg.default_speaker
+        self.use_onnx = cfg.use_onnx
+        self.speech_rate = cfg.speech_rate
+        self.streaming = cfg.streaming
+        self.backend = cfg.backend
 
         self._model = None
         self._speaker_info = None
+        
+    async def synthesize_stream(self, text: str, speaker: str = None) -> AsyncIterator[bytes]:
+        """
+        Streaming TTS synthesis - yields audio chunks as they're generated.
+        
+        Args:
+            text: Text to synthesize
+            speaker: Speaker key (optional)
+            
+        Yields:
+            Audio chunks (PCM S16LE bytes)
+        """
+        # Normalize text
+        text = normalize_for_tts(text)
+        text = clean_vietnamese_text(text)
+        
+        if not text:
+            return
+        
+        # Split into sentences for streaming
+        sentences = split_into_sentences(text, max_length=150)
+        
+        for sentence in sentences:
+            if sentence.strip():
+                audio_bytes = await self.synthesize(sentence, speaker)
+                if audio_bytes:
+                    yield audio_bytes
 
     def _ensure_loaded(self):
         """Lazy load TTS model."""
@@ -40,14 +73,29 @@ class TTSService:
 
         logger.info(f"Loading TTS model: {self.model_id}")
 
+        # Check backend preference
+        cfg = settings.tts
+        if cfg.backend == "edge-tts":
+            logger.info("Using edge-tts (TTS_BACKEND=edge-tts)")
+            self._model = FallbackTTS(speech_rate=self.speech_rate)
+            return
+
+        # Try Qwen-TTS (gwen-tts)
         try:
+            logger.info("Attempting to load Qwen-TTS...")
             from qwen_tts import Qwen3TTSModel
             import torch
+            
+            # Setup HF token
+            hf_token = os.getenv("HF_HUB_TOKEN")
+            if hf_token:
+                os.environ["HF_TOKEN"] = hf_token
 
             # Check for flash attention
             try:
                 import flash_attn
                 attn_impl = "flash_attention_2"
+                debug_log("Using Flash Attention 2")
             except ImportError:
                 attn_impl = "sdpa"
                 debug_log("Using SDPA attention (flash-attn not available)")
@@ -59,12 +107,16 @@ class TTSService:
                 attn_implementation=attn_impl,
             )
 
-            logger.info("TTS model loaded")
+            # Load speaker info
+            self._load_speaker_info()
 
-        except ImportError as e:
-            logger.error(f"TTS model import error: {e}")
-            logger.warning("Using fallback TTS (edge-tts)")
-            self._model = FallbackTTS()
+            logger.info("Qwen-TTS PyTorch model loaded successfully")
+            return
+
+        except Exception as e:
+            logger.warning(f"Qwen-TTS failed to load: {e}")
+            logger.warning("Falling back to edge-tts")
+            self._model = FallbackTTS(speech_rate=self.speech_rate)
 
     def _load_speaker_info(self):
         """Load reference speaker information."""
@@ -76,6 +128,7 @@ class TTSService:
 
         # Try to find ref_info.json
         ref_paths = [
+            Path(__file__).parent.parent / "data" / "ref_info.json",
             Path(__file__).parent.parent.parent / "inferances_demo" / "tts" / "data" / "ref_info.json",
             Path.home() / ".cache" / "gwen-tts" / "ref_info.json",
         ]
@@ -85,9 +138,18 @@ class TTSService:
                 with open(path, "r", encoding="utf-8") as f:
                     self._speaker_info = json.load(f)
                 debug_log(f"Loaded speaker info from {path}")
+                logger.info(f"Available speakers: {', '.join(self._speaker_info.keys())}")
                 return
 
-        self._speaker_info = {}
+        # Create default speaker info if not found
+        logger.warning("No speaker info found, creating default")
+        self._speaker_info = {
+            "default": {
+                "name": "Default Voice",
+                "text": "Xin chào, tôi là trợ lý ảo thông minh.",
+                "audio_path": None,  # Will use model defaults
+            }
+        }
 
     async def synthesize(self, text: str, speaker: str = None) -> bytes:
         """
@@ -100,6 +162,13 @@ class TTSService:
         Returns:
             PCM S16LE audio bytes at target sample rate
         """
+        # Normalize text before synthesis
+        text = normalize_for_tts(text)
+        text = clean_vietnamese_text(text)
+        
+        if not text:
+            return b""
+        
         return await asyncio.to_thread(self._synthesize_sync, text, speaker)
 
     def _synthesize_sync(self, text: str, speaker: str = None) -> bytes:
@@ -115,7 +184,14 @@ class TTSService:
             if isinstance(self._model, FallbackTTS):
                 audio, sr = self._model.synthesize(text)
             else:
-                audio, sr = self._synthesize_gwen(text, speaker)
+                try:
+                    audio, sr = self._synthesize_gwen(text, speaker)
+                except (ValueError, FileNotFoundError) as e:
+                    # Fall back to edge-tts if Gwen-TTS fails (missing ref audio, etc.)
+                    logger.warning(f"Gwen-TTS failed ({e}), falling back to edge-tts")
+                    if not isinstance(self._model, FallbackTTS):
+                        self._model = FallbackTTS()
+                    audio, sr = self._model.synthesize(text)
 
         # Resample if needed
         if sr != self.target_sample_rate:
@@ -127,10 +203,10 @@ class TTSService:
         return pcm.tobytes()
 
     def _synthesize_gwen(self, text: str, speaker: str) -> Tuple[np.ndarray, int]:
-        """Synthesize using Gwen-TTS."""
+        """Synthesize using Gwen-TTS (Qwen3TTS)."""
         self._load_speaker_info()
 
-        # Generation config
+        # Generation config (optimized for Vietnamese)
         gen_config = dict(
             temperature=0.3,
             top_k=20,
@@ -143,20 +219,42 @@ class TTSService:
             subtalker_top_p=1.0,
         )
 
-        # Get reference audio if available
+        # Qwen3TTSModel requires reference audio for voice cloning
+        ref_audio = None
+        ref_text = None
+        
         if speaker in self._speaker_info:
-            ref_audio = self._speaker_info[speaker].get("audio_path")
-            ref_text = self._speaker_info[speaker].get("text")
+            speaker_data = self._speaker_info[speaker]
+            ref_audio = speaker_data.get("audio_path")
+            ref_text = speaker_data.get("text")
+        
+        # If no reference audio, use default or first available
+        if not ref_audio:
+            if self._speaker_info:
+                # Use first available speaker
+                first_speaker_key = next(iter(self._speaker_info.keys()))
+                speaker_data = self._speaker_info[first_speaker_key]
+                ref_audio = speaker_data.get("audio_path")
+                ref_text = speaker_data.get("text")
+                logger.info(f"Using default speaker: {first_speaker_key}")
+            
+        # If still no reference, try without voice cloning (may not work for Qwen3TTS)
+        if not ref_audio or not ref_text:
+            logger.warning("No reference audio available for Qwen-TTS")
+            # Try direct generation (may fail for Qwen3TTS)
+            try:
+                wavs, sr = self._model.generate(text=text, **gen_config)
+                return wavs[0], sr
+            except:
+                raise ValueError("Qwen-TTS requires reference audio for voice cloning")
 
-            wavs, sr = self._model.generate_voice_clone(
-                text=text,
-                ref_audio=ref_audio,
-                ref_text=ref_text,
-                **gen_config,
-            )
-        else:
-            # Default synthesis without voice cloning
-            wavs, sr = self._model.generate(text=text, **gen_config)
+        # Voice cloning with reference
+        wavs, sr = self._model.generate_voice_clone(
+            text=text,
+            ref_audio=ref_audio,
+            ref_text=ref_text,
+            **gen_config,
+        )
 
         return wavs[0], sr
 
@@ -182,8 +280,10 @@ class TTSService:
 class FallbackTTS:
     """Fallback TTS using edge-tts (Microsoft Azure TTS)."""
 
-    def __init__(self):
-        self.voice = "vi-VN-HoaiMyNeural"
+    def __init__(self, speech_rate: float = 1.5):
+        # Try male voice for better stability
+        self.voice = "vi-VN-NamMinhNeural"  # Male voice, more stable
+        self.speech_rate = max(1.0, min(speech_rate, 1.5))  # Limit to 1.0-1.5x (edge-tts can be unstable at 2x)
         self._edge_tts = None
 
     def synthesize(self, text: str) -> Tuple[np.ndarray, int]:
@@ -193,22 +293,90 @@ class FallbackTTS:
         import edge_tts
         import soundfile as sf
 
+        if not text or not text.strip():
+            return np.array([], dtype=np.float32), 16000
+
+        # Text is already normalized by TTSService.synthesize()
+        text = text.strip()
+        
+        # Edge-TTS sometimes fails with very short texts, add minimum length
+        if len(text) < 3:
+            logger.debug(f"Text too short for TTS: '{text}'")
+            return np.array([], dtype=np.float32), 16000
+        
+        # Ensure text ends with punctuation (edge-tts works better)
+        if text and text[-1] not in '.!?,;:':
+            text += '.'
+        
+        # Length limit
+        if len(text) > 1000:
+            text = text[:1000]
+        
+        logger.debug(f"Edge-TTS synthesizing: '{text[:50]}...' ({len(text)} chars)")
+
+        # Calculate rate parameter for edge-tts
+        # Limit to +25% for stability (HoaiMyNeural fails at +50%)
+        rate_percent = int((min(self.speech_rate, 1.25) - 1.0) * 100)
+        rate_str = f"+{rate_percent}%" if rate_percent > 0 else "+0%"
+
         async def _synthesize():
-            communicate = edge_tts.Communicate(text, self.voice)
-            audio_data = b""
-            async for chunk in communicate.stream():
-                if chunk["type"] == "audio":
-                    audio_data += chunk["data"]
-            return audio_data
+            try:
+                communicate = edge_tts.Communicate(
+                    text=text,
+                    voice=self.voice,
+                    rate=rate_str,
+                )
+                audio_data = b""
+                async for chunk in communicate.stream():
+                    if chunk["type"] == "audio":
+                        audio_data += chunk["data"]
+                
+                # Retry with slower rate if failed
+                if not audio_data and rate_percent > 0:
+                    logger.warning(f"Retrying with slower rate (+0%)")
+                    communicate = edge_tts.Communicate(
+                        text=text,
+                        voice=self.voice,
+                        rate="+0%",
+                    )
+                    async for chunk in communicate.stream():
+                        if chunk["type"] == "audio":
+                            audio_data += chunk["data"]
+                
+                if not audio_data:
+                    logger.warning(f"Edge-TTS returned empty audio for: '{text[:50]}'")
+                
+                return audio_data
+            except Exception as e:
+                logger.error(f"Edge-TTS synthesis error for text '{text[:50]}': {e}")
+                # Try one more time with default parameters
+                try:
+                    logger.info("Retrying with default parameters...")
+                    communicate = edge_tts.Communicate(text=text, voice=self.voice)
+                    audio_data = b""
+                    async for chunk in communicate.stream():
+                        if chunk["type"] == "audio":
+                            audio_data += chunk["data"]
+                    return audio_data
+                except:
+                    return b""
 
         # Run async in sync context
         try:
             loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # Already in async context, create new loop
+                import nest_asyncio
+                nest_asyncio.apply()
         except RuntimeError:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
 
         audio_bytes = loop.run_until_complete(_synthesize())
+        
+        if not audio_bytes:
+            logger.warning("edge-tts returned empty audio")
+            return np.array([], dtype=np.float32), 16000
 
         # Decode audio
         audio, sr = sf.read(io.BytesIO(audio_bytes))

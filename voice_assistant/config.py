@@ -43,7 +43,7 @@ class AudioConfig:
 @dataclass
 class VADConfig:
     """Voice Activity Detection settings."""
-    threshold: float = 0.5
+    threshold: float = 0.75
     min_silence_duration_ms: int = 500
     speech_pad_ms: int = 30
     chunk_size: int = 512  # Silero optimal
@@ -55,6 +55,8 @@ class ASRConfig:
     model_id: str = "g-group-ai-lab/gipformer-65M-rnnt"
     device: str = "auto"
     language: str = "Vietnamese"
+    use_onnx: bool = True  # Prefer ONNX (faster, simpler)
+    use_pytorch_cuda: bool = False  # Use PyTorch with CUDA if ONNX fails
     # Streaming
     interim_interval_ms: int = 800
     min_audio_for_interim_ms: int = 600
@@ -80,6 +82,10 @@ class TTSConfig:
     output_sample_rate: int = 24000
     target_sample_rate: int = 16000
     default_speaker: str = "yen_nhi"
+    backend: str = "auto"  # auto, gwen, edge-tts
+    use_onnx: bool = True  # Use ONNX runtime for faster inference
+    speech_rate: float = 1.5  # Speed multiplier (1.0 = normal, 1.5 = faster, 2.0 = very fast)
+    streaming: bool = True  # Enable streaming TTS output
 
 
 @dataclass
@@ -90,6 +96,11 @@ class PipelineConfig:
     max_buffer_duration_ms: int = 15000
     interrupt_threshold_chunks: int = 6
     post_tts_buffer_ms: int = 500
+    # Timeouts (prevent hanging)
+    asr_timeout_s: int = 10  # ASR should complete within 10s
+    llm_timeout_s: int = 30  # LLM should start streaming within 30s
+    tts_timeout_s: int = 15  # TTS should complete within 15s
+    pipeline_timeout_s: int = 60  # Total pipeline timeout
 
 
 @dataclass
@@ -134,6 +145,14 @@ class Settings:
             settings.asr.device = os.getenv("ASR_DEVICE")
         if os.getenv("TTS_DEVICE"):
             settings.tts.device = os.getenv("TTS_DEVICE")
+        if os.getenv("TTS_BACKEND"):
+            settings.tts.backend = os.getenv("TTS_BACKEND")
+        if os.getenv("TTS_SPEECH_RATE"):
+            settings.tts.speech_rate = float(os.getenv("TTS_SPEECH_RATE"))
+        if os.getenv("TTS_USE_ONNX"):
+            settings.tts.use_onnx = os.getenv("TTS_USE_ONNX", "").lower() == "true"
+        if os.getenv("TTS_STREAMING"):
+            settings.tts.streaming = os.getenv("TTS_STREAMING", "").lower() == "true"
 
         # LLM settings
         if os.getenv("LLM_PROVIDER"):

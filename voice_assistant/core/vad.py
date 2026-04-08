@@ -4,12 +4,13 @@ Streaming-optimized with VADIterator.
 """
 
 import asyncio
+import time
 from dataclasses import dataclass
 from typing import Optional, Literal
 import numpy as np
 
 from ..config import settings
-from ..utils.logging import debug_log
+from ..utils.logging import debug_log, log_vad_event, logger
 from .audio import AudioPreprocessor
 
 
@@ -19,6 +20,7 @@ class VADResult:
     event: Optional[Literal["start", "end"]] = None
     is_speech: bool = False
     confidence: float = 0.0
+    latency_ms: float = 0.0
 
 
 class VADService:
@@ -42,6 +44,8 @@ class VADService:
         self._iterator = None
         self._preprocessor = AudioPreprocessor()
         self._is_speech_active = False
+        self._speech_chunks = 0
+        self._silence_chunks = 0
 
     def _ensure_loaded(self):
         """Lazy load Silero VAD model."""
@@ -50,6 +54,8 @@ class VADService:
 
         import torch
         self._torch = torch
+
+        log_vad_event("Loading Silero VAD model...")
 
         # Load Silero VAD
         self._model, utils = torch.hub.load(
@@ -72,13 +78,17 @@ class VADService:
             speech_pad_ms=self.speech_pad_ms,
         )
 
-        debug_log("VAD model loaded", threshold=self.threshold)
+        log_vad_event("Model loaded", speech_prob=self.threshold)
+        logger.info(f"VAD initialized: threshold={self.threshold}, silence={self.min_silence_duration_ms}ms")
 
     def reset(self):
         """Reset VAD state for new conversation."""
         if self._iterator is not None:
             self._iterator.reset_states()
         self._is_speech_active = False
+        self._speech_chunks = 0
+        self._silence_chunks = 0
+        log_vad_event("Reset")
 
     def process_chunk(self, audio_data: bytes) -> VADResult:
         """
@@ -90,6 +100,7 @@ class VADService:
         Returns:
             VADResult with event type and speech status
         """
+        start_time = time.perf_counter()
         self._ensure_loaded()
 
         # Preprocess audio
@@ -97,6 +108,7 @@ class VADService:
 
         # Process in 512-sample sub-chunks (Silero optimal)
         event_type = None
+        last_prob = 0.0
 
         for i in range(0, len(audio), self.chunk_size):
             chunk = audio[i:i + self.chunk_size]
@@ -109,20 +121,45 @@ class VADService:
             # Run VAD
             speech_dict = self._iterator(tensor, return_seconds=True)
 
+            # Get probability for logging
+            with self._torch.no_grad():
+                prob = self._model(tensor.unsqueeze(0), settings.audio.sample_rate).item()
+                last_prob = prob
+
             # Parse events
             if speech_dict:
                 if "start" in speech_dict:
                     self._is_speech_active = True
+                    self._speech_chunks = 0
                     event_type = "start"
-                    debug_log("VAD speech start", time=speech_dict.get("start"))
+                    log_vad_event("SPEECH_START", speech_prob=prob)
                 elif "end" in speech_dict:
                     self._is_speech_active = False
                     event_type = "end"
-                    debug_log("VAD speech end", time=speech_dict.get("end"))
+                    log_vad_event("SPEECH_END", speech_prob=prob, chunks=self._speech_chunks)
+
+        # Track consecutive speech/silence
+        if self._is_speech_active:
+            self._speech_chunks += 1
+            self._silence_chunks = 0
+        else:
+            self._silence_chunks += 1
+
+        latency_ms = (time.perf_counter() - start_time) * 1000
+
+        # Periodic status logging
+        if settings.debug and (self._speech_chunks % 10 == 1 or self._silence_chunks % 50 == 1):
+            log_vad_event(
+                f"{'SPEECH' if self._is_speech_active else 'SILENCE'}",
+                speech_prob=last_prob,
+                chunks=self._speech_chunks if self._is_speech_active else self._silence_chunks
+            )
 
         return VADResult(
             event=event_type,
             is_speech=self._is_speech_active,
+            confidence=last_prob,
+            latency_ms=latency_ms,
         )
 
     async def process_chunk_async(self, audio_data: bytes) -> VADResult:

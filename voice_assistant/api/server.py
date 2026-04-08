@@ -5,10 +5,13 @@ With session management and conversation state tracking.
 
 import asyncio
 import json
+from pathlib import Path
 from typing import Optional, Dict
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 from ..config import settings
 from ..utils.logging import logger, debug_log
@@ -34,6 +37,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Mount static files
+STATIC_DIR = Path(__file__).parent / "static"
+if STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 # Session manager
 session_manager: SessionManager = None
@@ -163,11 +171,30 @@ manager = ConnectionManager()
 
 @app.get("/")
 async def root():
-    """Health check endpoint."""
+    """Serve web UI."""
+    index_file = STATIC_DIR / "index.html"
+    if index_file.exists():
+        return FileResponse(index_file)
     return {
         "status": "ok",
         "service": "Vietnamese Voice Assistant",
         "version": "1.0.0",
+        "ui": "/static/index.html",
+    }
+
+
+@app.get("/api")
+async def api_info():
+    """API info endpoint."""
+    return {
+        "status": "ok",
+        "service": "Vietnamese Voice Assistant",
+        "version": "1.0.0",
+        "endpoints": {
+            "websocket": "/ws",
+            "health": "/health",
+            "sessions": "/sessions",
+        },
     }
 
 

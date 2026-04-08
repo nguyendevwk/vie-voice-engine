@@ -81,6 +81,7 @@ class CLIAssistant:
             on_llm_sentence=self._on_llm_sentence,
             on_audio_chunk=self._on_audio_chunk,
             on_state_change=self._on_state_change,
+            enable_tts=not self.no_tts,
         )
 
         if not self.no_tts:

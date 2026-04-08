@@ -267,40 +267,75 @@ class PipelineOrchestrator:
             # Add to history
             self._conversation_history.append(Message(role="user", content=user_text))
 
-            # Stream LLM → TTS
+            # Stream LLM → TTS with timeout
             full_response = ""
             tts_duration_ms = 0
+            sentence_count = 0
+            
+            # Start LLM stream
+            llm_start = time.time()
+            llm_timeout_reached = False
+            
+            try:
+                async for sentence in self.llm.generate_response_stream(
+                    user_text,
+                    history=self._conversation_history[-10:],  # Keep last 10 messages
+                ):
+                    # Check timeout manually for async generators
+                    if time.time() - llm_start > settings.pipeline.llm_timeout_s:
+                        logger.error("LLM stream timeout")
+                        llm_timeout_reached = True
+                        break
+                    
+                    if self._should_interrupt:
+                        debug_log("Pipeline interrupted")
+                        break
 
-            async for sentence in self.llm.generate_response_stream(
-                user_text,
-                history=self._conversation_history[-10:],  # Keep last 10 messages
-            ):
-                if self._should_interrupt:
-                    debug_log("Pipeline interrupted")
-                    break
+                    sentence_count += 1
+                    full_response += sentence + " "
 
-                # Emit text response
-                await self._emit("response", {"text": sentence})
-                full_response += sentence + " "
+                    # Emit text response immediately
+                    await self._emit("response", {"text": sentence, "is_final": False})
 
-                # Synthesize TTS
-                audio_bytes = await self.tts.synthesize(sentence)
+                    # Synthesize TTS with timeout
+                    try:
+                        audio_bytes = await asyncio.wait_for(
+                            self.tts.synthesize(sentence),
+                            timeout=settings.pipeline.tts_timeout_s
+                        )
 
-                if audio_bytes:
-                    # Track duration
-                    tts_duration_ms += self.tts.get_audio_duration_ms(audio_bytes)
+                        if audio_bytes:
+                            # Track duration
+                            tts_duration_ms += self.tts.get_audio_duration_ms(audio_bytes)
 
-                    # Emit audio
-                    await self._emit("audio", audio_bytes)
+                            # Emit audio
+                            await self._emit("audio", audio_bytes)
+                    except asyncio.TimeoutError:
+                        logger.warning(f"TTS timeout for sentence {sentence_count}")
+                        continue  # Skip this sentence
+                    except Exception as e:
+                        logger.error(f"TTS error: {e}")
+                        continue
+                
+                # Handle timeout case
+                if llm_timeout_reached and not full_response:
+                    full_response = "Xin lỗi, tôi đang gặp sự cố khi xử lý câu hỏi của bạn."
+                    
+            except Exception as e:
+                logger.error(f"LLM stream error: {e}")
+                if not full_response:
+                    full_response = "Xin lỗi, đã xảy ra lỗi khi xử lý câu hỏi của bạn."
 
             # Add assistant response to history
             if full_response.strip():
                 self._conversation_history.append(
                     Message(role="assistant", content=full_response.strip())
                 )
+                # Send final response
+                await self._emit("response", {"text": full_response.strip(), "is_final": True})
 
-            # Wait for TTS playback before unmute
-            playback_wait = (tts_duration_ms / 1000) + (self._post_tts_buffer_ms / 1000)
+            # Reduced wait time for better responsiveness
+            playback_wait = min(tts_duration_ms / 1000, 2.0) + 0.3  # Max 2s + 300ms buffer
             await asyncio.sleep(playback_wait)
 
         except Exception as e:

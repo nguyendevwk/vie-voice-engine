@@ -1,23 +1,31 @@
-"""Utility modules for Voice Assistant."""
+"""
+Utility functions and helpers.
 
-from .logging import (
-    logger,
-    latency,
-    LatencyTracker,
-    setup_logging,
-    debug_log,
-    log_asr_result,
-    log_llm_token,
-    log_error,
+This module provides:
+    - Logging: Enhanced logging with latency tracking
+    - Text Utils: Text normalization for Vietnamese TTS
+    - Configuration: Settings management
+"""
+
+from .logging import logger, debug_log, latency, LatencyTracker
+from .text_utils import (
+    normalize_for_tts,
+    normalize_llm_output,
+    clean_vietnamese_text,
+    split_into_sentences,
+    remove_markdown,
 )
 
 __all__ = [
+    # Logging
     "logger",
+    "debug_log",
     "latency",
     "LatencyTracker",
-    "setup_logging",
-    "debug_log",
-    "log_asr_result",
-    "log_llm_token",
-    "log_error",
+    # Text processing
+    "normalize_for_tts",
+    "normalize_llm_output",
+    "clean_vietnamese_text",
+    "split_into_sentences",
+    "remove_markdown",
 ]

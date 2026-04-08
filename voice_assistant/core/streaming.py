@@ -11,7 +11,11 @@ from typing import AsyncIterator, Callable, List, Optional, Awaitable, Tuple
 import numpy as np
 
 from ..config import settings
-from ..utils.logging import debug_log, latency, logger, log_error, log_asr_result
+from ..utils.logging import (
+    debug_log, latency, logger, log_error, log_asr_result,
+    log_asr_event, log_llm_event, log_tts_event, log_vad_event,
+    log_pipeline_state, log_audio_chunk,
+)
 from .audio import AudioPreprocessor
 
 
@@ -227,12 +231,14 @@ class StreamingPipeline:
         on_llm_sentence: Callable[[str], Awaitable[None]] = None,
         on_audio_chunk: Callable[[bytes], Awaitable[None]] = None,
         on_state_change: Callable[[StreamState], Awaitable[None]] = None,
+        enable_tts: bool = True,
     ):
         # Components
         self._vad = None
         self._asr = RealtimeASRProcessor()
         self._llm = None
-        self._tts = RealtimeTTSProcessor()
+        self._tts = RealtimeTTSProcessor() if enable_tts else None
+        self._enable_tts = enable_tts
 
         # Callbacks
         self.on_interim_transcript = on_interim_transcript
@@ -282,8 +288,16 @@ class StreamingPipeline:
         """
         self._ensure_vad()
 
+        # Log audio chunk
+        chunk_duration_ms = len(audio_chunk) / 2 / settings.audio.sample_rate * 1000
+        log_audio_chunk("input", chunk_duration_ms)
+
         # Run VAD
         vad_result = await self._vad.process_chunk_async(audio_chunk)
+
+        # Log VAD result
+        if vad_result.event:
+            log_vad_event(f"Event: {vad_result.event}", speech_prob=vad_result.confidence)
 
         # Speech start
         if vad_result.event == "start":
@@ -292,6 +306,7 @@ class StreamingPipeline:
         # During speech
         if self._state == StreamState.LISTENING and vad_result.is_speech:
             self._asr.add_audio(audio_chunk)
+            log_asr_event("Buffer add", latency_ms=self._asr.buffer_duration_ms())
 
         # Speech end
         if vad_result.event == "end" and self._state == StreamState.LISTENING:
@@ -314,6 +329,8 @@ class StreamingPipeline:
 
         self._asr.reset()
         await self._set_state(StreamState.LISTENING)
+        log_pipeline_state("IDLE", "LISTENING")
+        logger.info("[PIPELINE] Speech detected, start listening...")
 
         # Start interim ASR loop
         self._interim_task = asyncio.create_task(self._interim_loop())
@@ -328,6 +345,10 @@ class StreamingPipeline:
                 if interim:
                     if self._metrics.first_interim == 0:
                         self._metrics.first_interim = time.perf_counter()
+                        latency_ms = (self._metrics.first_interim - self._metrics.utterance_start) * 1000
+                        log_asr_event("First interim", text=interim, latency_ms=latency_ms)
+
+                    log_asr_result(interim, is_final=False)
 
                     if self.on_interim_transcript:
                         await self.on_interim_transcript(interim)
@@ -337,6 +358,9 @@ class StreamingPipeline:
 
     async def _on_speech_end(self) -> Optional[str]:
         """Handle speech end."""
+        log_pipeline_state("LISTENING", "TRANSCRIBING")
+        logger.info("[PIPELINE] Speech ended, transcribing...")
+
         # Cancel interim task
         if self._interim_task:
             self._interim_task.cancel()
@@ -346,19 +370,27 @@ class StreamingPipeline:
                 pass
 
         # Check minimum duration
-        if self._asr.buffer_duration_ms < settings.pipeline.min_utterance_duration_ms:
-            debug_log("Utterance too short, ignoring")
+        buffer_ms = self._asr.buffer_duration_ms
+        if buffer_ms < settings.pipeline.min_utterance_duration_ms:
+            log_asr_event("Utterance too short", latency_ms=buffer_ms)
             await self._set_state(StreamState.IDLE)
             return None
 
         # Get final transcript
         await self._set_state(StreamState.TRANSCRIBING)
+        transcribe_start = time.perf_counter()
         final_text = await self._asr.get_final()
+        transcribe_latency = (time.perf_counter() - transcribe_start) * 1000
         self._metrics.final_transcript = time.perf_counter()
 
         if not final_text:
+            log_asr_event("No transcript", latency_ms=transcribe_latency)
             await self._set_state(StreamState.IDLE)
             return None
+
+        total_latency = (self._metrics.final_transcript - self._metrics.utterance_start) * 1000
+        log_asr_result(final_text, is_final=True, latency_ms=total_latency)
+        logger.info(f"[ASR] Final: \"{final_text}\" ({total_latency:.0f}ms)")
 
         if self.on_final_transcript:
             await self.on_final_transcript(final_text)
@@ -377,6 +409,8 @@ class StreamingPipeline:
 
         try:
             await self._set_state(StreamState.GENERATING)
+            log_pipeline_state("TRANSCRIBING", "GENERATING")
+            log_llm_event("Start generation")
 
             # Add to history
             self._history.append({"role": "user", "content": user_text})
@@ -385,17 +419,23 @@ class StreamingPipeline:
             full_response = ""
             sentence_buffer = ""
             first_token = True
+            token_count = 0
+            llm_start = time.perf_counter()
 
             async for token in self._llm.generate_tokens(
                 user_text,
                 history=[type('M', (), h)() for h in self._history[-10:]],
             ):
                 if self._should_interrupt:
-                    debug_log("Generation interrupted")
+                    log_llm_event("Interrupted", tokens=token_count)
                     break
+
+                token_count += 1
 
                 if first_token:
                     self._metrics.first_llm_token = time.perf_counter()
+                    first_token_latency = (self._metrics.first_llm_token - self._metrics.final_transcript) * 1000
+                    log_llm_event("First token", latency_ms=first_token_latency)
                     first_token = False
 
                 # Emit token
@@ -417,18 +457,34 @@ class StreamingPipeline:
 
                         # Synthesize TTS
                         await self._set_state(StreamState.SYNTHESIZING)
-                        audio = await self._tts.synthesize(sentence)
+                        log_tts_event("Synthesizing", text=sentence)
+                        tts_start = time.perf_counter()
+
+                        if self._enable_tts and self._tts:
+                            audio = await self._tts.synthesize(sentence)
+                        else:
+                            audio = None
 
                         if audio:
+                            tts_latency = (time.perf_counter() - tts_start) * 1000
+                            audio_duration = self._tts.get_duration_ms(audio)
+                            log_tts_event("Complete", duration_ms=audio_duration, latency_ms=tts_latency)
+
                             if self._metrics.first_audio_chunk == 0:
                                 self._metrics.first_audio_chunk = time.perf_counter()
+                                first_audio_latency = (self._metrics.first_audio_chunk - self._metrics.utterance_start) * 1000
+                                logger.info(f"[TTS] First audio chunk: {first_audio_latency:.0f}ms from utterance start")
 
-                            self._metrics.total_audio_ms += self._tts.get_duration_ms(audio)
+                            self._metrics.total_audio_ms += audio_duration
 
                             if self.on_audio_chunk:
                                 await self.on_audio_chunk(audio)
 
                         await self._set_state(StreamState.GENERATING)
+
+            # Log LLM completion
+            llm_duration = (time.perf_counter() - llm_start) * 1000
+            log_llm_event("Complete", tokens=token_count, latency_ms=llm_duration)
 
             # Flush remaining text
             if sentence_buffer.strip() and not self._should_interrupt:
@@ -437,7 +493,10 @@ class StreamingPipeline:
                     await self.on_llm_sentence(sentence)
 
                 await self._set_state(StreamState.SYNTHESIZING)
-                audio = await self._tts.synthesize(sentence)
+                if self._enable_tts and self._tts:
+                    audio = await self._tts.synthesize(sentence)
+                else:
+                    audio = None
                 if audio:
                     self._metrics.total_audio_ms += self._tts.get_duration_ms(audio)
                     if self.on_audio_chunk:
@@ -454,20 +513,23 @@ class StreamingPipeline:
             log_error("pipeline", e)
         finally:
             await self._set_state(StreamState.IDLE)
+            log_pipeline_state("*", "IDLE")
             self._metrics.log_summary()
+            logger.info("[PIPELINE] Turn complete")
 
     async def _handle_interrupt(self):
         """Handle user interrupt."""
         if self._should_interrupt:
             return
 
-        debug_log("Interrupt detected")
+        logger.info("[PIPELINE] Interrupt detected!")
         self._should_interrupt = True
 
         if self._pipeline_task:
             self._pipeline_task.cancel()
 
         await self._set_state(StreamState.INTERRUPTED)
+        log_pipeline_state("*", "INTERRUPTED")
 
         # Reset for new speech
         self._asr.reset()
@@ -507,13 +569,17 @@ class StreamingPipeline:
                 sentence_buffer = ""
 
                 if sentence:
-                    audio = await self._tts.synthesize(sentence)
+                    audio = b""
+                    if self._enable_tts and self._tts:
+                        audio = await self._tts.synthesize(sentence)
                     yield sentence, audio
 
         # Flush
         if sentence_buffer.strip():
             sentence = sentence_buffer.strip()
-            audio = await self._tts.synthesize(sentence)
+            audio = b""
+            if self._enable_tts and self._tts:
+                audio = await self._tts.synthesize(sentence)
             yield sentence, audio
 
         self._history.append({"role": "assistant", "content": full_response.strip()})

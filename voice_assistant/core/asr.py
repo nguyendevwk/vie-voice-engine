@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 
 from ..config import settings
-from ..utils.logging import debug_log, log_asr_result, latency, logger
+from ..utils.logging import debug_log, log_asr_result, log_asr_event, latency, logger
 from .audio import AudioPreprocessor
 
 
@@ -30,13 +30,16 @@ class ASRService:
     Vietnamese ASR using Gipformer model.
 
     Supports both batch and streaming modes.
+    Uses ONNX by default (faster, no k2 dependency).
     """
 
-    def __init__(self, config=None):
+    def __init__(self, config=None, use_onnx: bool = True, use_pytorch_cuda: bool = False):
         cfg = config or settings.asr
         self.model_id = cfg.model_id
         self.device = cfg.device
         self.language = cfg.language
+        self.use_onnx = use_onnx
+        self.use_pytorch_cuda = use_pytorch_cuda
 
         self._model = None
         self._preprocessor = AudioPreprocessor()
@@ -46,25 +49,44 @@ class ASRService:
         if self._model is not None:
             return
 
-        import torch
+        # Try backends in order: ONNX → PyTorch CUDA → PyTorch k2 → Whisper
+        if self.use_onnx:
+            try:
+                from .asr_onnx import GipformerONNXASR
+                self._model = GipformerONNXASR(
+                    quantize="int8",  # Faster
+                    num_threads=4,
+                )
+                logger.info("Using ONNX ASR (sherpa-onnx)")
+                return
+            except ImportError as e:
+                logger.warning(f"ONNX ASR not available: {e}")
 
-        device = self.device
-        if device == "auto":
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+        # Try PyTorch CUDA (if explicitly requested)
+        if self.use_pytorch_cuda and "cuda" in self.device:
+            try:
+                from .asr_pytorch import GipformerPyTorchASR
+                self._model = GipformerPyTorchASR(
+                    model_id=self.model_id,
+                    device=self.device,
+                )
+                logger.info("Using PyTorch CUDA ASR")
+                return
+            except (ImportError, RuntimeError) as e:
+                logger.warning(f"PyTorch CUDA ASR not available: {e}")
 
-        logger.info(f"Loading ASR model: {self.model_id} on {device}")
-
-        # Import and setup Gipformer (from inferances_demo)
-        # Note: This requires icefall setup - see inferances_demo/asr/infer_pytorch.py
+        # Try k2/icefall PyTorch
         try:
             from .asr_gipformer import GipformerASR
-            self._model = GipformerASR(device=device)
-        except ImportError:
-            # Fallback: use whisper or other model
-            logger.warning("Gipformer not available, using fallback ASR")
-            self._model = FallbackASR(device=device)
+            self._model = GipformerASR(device=self.device)
+            logger.info("Using PyTorch ASR (k2/icefall)")
+            return
+        except ImportError as e:
+            logger.warning(f"PyTorch ASR not available: {e}")
 
-        logger.info("ASR model loaded")
+        # Fallback to Whisper
+        logger.warning("Gipformer not available, using Whisper fallback")
+        self._model = FallbackASR(device=self.device)
 
     def transcribe_file(self, audio_path: str) -> str:
         """Transcribe audio file."""
@@ -86,11 +108,24 @@ class ASRService:
         """
         self._ensure_loaded()
 
-        # Concatenate and process audio
+        # Concatenate audio
         raw_audio = b"".join(audio_chunks)
-        audio = self._preprocessor.decode_pcm16(raw_audio)
 
-        # Save to temp file (model expects file path)
+        # Check if model supports direct bytes transcription
+        if hasattr(self._model, 'transcribe_bytes'):
+            with latency.track("asr_transcribe"):
+                text = self._model.transcribe_bytes(raw_audio)
+            return text.strip()
+
+        # Otherwise use array
+        if hasattr(self._model, 'transcribe_array'):
+            audio = self._preprocessor.decode_pcm16(raw_audio)
+            with latency.track("asr_transcribe"):
+                text = self._model.transcribe_array(audio, settings.audio.sample_rate)
+            return text.strip()
+
+        # Fallback: save to temp file
+        audio = self._preprocessor.decode_pcm16(raw_audio)
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
             import soundfile as sf
             sf.write(f.name, audio, settings.audio.sample_rate)

@@ -1,0 +1,8 @@
+{
+  "default": {
+    "name": "Default Vietnamese Voice",
+    "text": "Xin chào, tôi là trợ lý ảo thông minh.",
+    "audio_path": "default_ref.wav",
+    "description": "Default reference voice"
+  }
+}
