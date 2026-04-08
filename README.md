@@ -26,6 +26,23 @@ Audio Input → VAD → ASR → LLM → TTS → Audio Output
 
 ## Installation
 
+### With uv (Recommended)
+
+```bash
+# Clone
+git clone https://github.com/nguyendevwk/end2end_asr_tts_vie.git
+cd end2end_asr_tts_vie
+
+# Install with uv
+uv sync
+
+# Configure
+cp .env.example .env
+# Edit .env with your GROQ_API_KEY
+```
+
+### With pip
+
 ```bash
 # Clone
 git clone https://github.com/nguyendevwk/end2end_asr_tts_vie.git
@@ -70,7 +87,12 @@ DEBUG=false
 ### Web UI
 
 ```bash
+# With uv
+uv run python -m voice_assistant.api.server
+
+# With pip/venv
 python -m voice_assistant.api.server
+
 # Open http://localhost:8000
 ```
 
@@ -78,10 +100,10 @@ python -m voice_assistant.api.server
 
 ```bash
 # Voice mode
-python -m voice_assistant.cli.main
+uv run python -m voice_assistant.cli.main
 
 # Text mode
-python -m voice_assistant.cli.main --text-only --no-tts
+uv run python -m voice_assistant.cli.main --text-only --no-tts
 ```
 
 ### Python API
@@ -137,6 +159,10 @@ Install VieNeu-TTS for CPU-only: `pip install vieneu`
 ## Testing
 
 ```bash
+# With uv
+uv run pytest tests/ -v
+
+# With pip/venv
 pytest tests/ -v
 ```
 

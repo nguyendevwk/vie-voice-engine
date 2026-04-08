@@ -112,3 +112,9 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=9.0.0",
+    "pytest-asyncio>=1.0.0",
+]
