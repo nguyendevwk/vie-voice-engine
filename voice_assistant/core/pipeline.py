@@ -276,6 +276,10 @@ class PipelineOrchestrator:
             llm_start = time.time()
             llm_timeout_reached = False
             
+            # Buffer for short sentences (edge-tts fails on short texts)
+            MIN_TTS_LENGTH = 15
+            sentence_buffer = ""
+            
             try:
                 async for sentence in self.llm.generate_response_stream(
                     user_text,
@@ -296,11 +300,18 @@ class PipelineOrchestrator:
 
                     # Emit text response immediately
                     await self._emit("response", {"text": sentence, "is_final": False})
+                    
+                    # Buffer short sentences for TTS
+                    sentence_buffer = (sentence_buffer + " " + sentence).strip() if sentence_buffer else sentence
+                    
+                    # Only synthesize when buffer is long enough
+                    if len(sentence_buffer) < MIN_TTS_LENGTH:
+                        continue  # Wait for more text
 
                     # Synthesize TTS with timeout
                     try:
                         audio_bytes = await asyncio.wait_for(
-                            self.tts.synthesize(sentence),
+                            self.tts.synthesize(sentence_buffer),
                             timeout=settings.pipeline.tts_timeout_s
                         )
 
@@ -310,12 +321,30 @@ class PipelineOrchestrator:
 
                             # Emit audio
                             await self._emit("audio", audio_bytes)
+                        
+                        # Clear buffer after successful synthesis
+                        sentence_buffer = ""
                     except asyncio.TimeoutError:
                         logger.warning(f"TTS timeout for sentence {sentence_count}")
+                        sentence_buffer = ""  # Clear buffer to avoid repeating
                         continue  # Skip this sentence
                     except Exception as e:
                         logger.error(f"TTS error: {e}")
+                        sentence_buffer = ""
                         continue
+                
+                # Synthesize any remaining buffer
+                if sentence_buffer and len(sentence_buffer) >= 5:
+                    try:
+                        audio_bytes = await asyncio.wait_for(
+                            self.tts.synthesize(sentence_buffer),
+                            timeout=settings.pipeline.tts_timeout_s
+                        )
+                        if audio_bytes:
+                            tts_duration_ms += self.tts.get_audio_duration_ms(audio_bytes)
+                            await self._emit("audio", audio_bytes)
+                    except Exception as e:
+                        logger.warning(f"TTS error for remaining buffer: {e}")
                 
                 # Handle timeout case
                 if llm_timeout_reached and not full_response:

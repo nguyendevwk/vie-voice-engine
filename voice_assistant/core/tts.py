@@ -60,7 +60,29 @@ class TTSService:
         # Split into sentences for streaming
         sentences = split_into_sentences(text, max_length=150)
         
+        # Merge short sentences to avoid edge-tts failure on short texts
+        merged_sentences = []
+        buffer = ""
+        MIN_TTS_LENGTH = 15  # Minimum characters for edge-tts
+        
         for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            
+            if len(buffer) + len(sentence) < MIN_TTS_LENGTH:
+                # Merge short segments
+                buffer = (buffer + " " + sentence).strip() if buffer else sentence
+            else:
+                if buffer:
+                    merged_sentences.append(buffer)
+                buffer = sentence
+        
+        # Don't forget remaining buffer
+        if buffer:
+            merged_sentences.append(buffer)
+        
+        for sentence in merged_sentences:
             if sentence.strip():
                 audio_bytes = await self.synthesize(sentence, speaker)
                 if audio_bytes:
@@ -231,22 +253,24 @@ class TTSService:
         # If no reference audio, use default or first available
         if not ref_audio:
             if self._speaker_info:
-                # Use first available speaker
-                first_speaker_key = next(iter(self._speaker_info.keys()))
-                speaker_data = self._speaker_info[first_speaker_key]
-                ref_audio = speaker_data.get("audio_path")
-                ref_text = speaker_data.get("text")
-                logger.info(f"Using default speaker: {first_speaker_key}")
+                # Use first available speaker with valid audio
+                for key, speaker_data in self._speaker_info.items():
+                    if key.startswith("_"):  # Skip metadata entries
+                        continue
+                    audio_path = speaker_data.get("audio_path")
+                    if audio_path and os.path.exists(audio_path):
+                        ref_audio = audio_path
+                        ref_text = speaker_data.get("text")
+                        logger.info(f"Using speaker: {key}")
+                        break
             
-        # If still no reference, try without voice cloning (may not work for Qwen3TTS)
+        # If still no valid reference, raise error to trigger fallback
         if not ref_audio or not ref_text:
-            logger.warning("No reference audio available for Qwen-TTS")
-            # Try direct generation (may fail for Qwen3TTS)
-            try:
-                wavs, sr = self._model.generate(text=text, **gen_config)
-                return wavs[0], sr
-            except:
-                raise ValueError("Qwen-TTS requires reference audio for voice cloning")
+            raise ValueError("No reference audio available - Qwen-TTS requires reference audio for voice cloning")
+        
+        # Check if reference audio file exists
+        if not os.path.exists(ref_audio):
+            raise FileNotFoundError(f"Reference audio not found: {ref_audio}")
 
         # Voice cloning with reference
         wavs, sr = self._model.generate_voice_clone(
@@ -299,13 +323,13 @@ class FallbackTTS:
         # Text is already normalized by TTSService.synthesize()
         text = text.strip()
         
-        # Edge-TTS sometimes fails with very short texts, add minimum length
-        if len(text) < 3:
-            logger.debug(f"Text too short for TTS: '{text}'")
+        # Edge-TTS fails with short texts (< 10 chars), need minimum length
+        if len(text) < 10:
+            logger.debug(f"Text too short for TTS: '{text}' ({len(text)} chars)")
             return np.array([], dtype=np.float32), 16000
         
         # Ensure text ends with punctuation (edge-tts works better)
-        if text and text[-1] not in '.!?,;:':
+        if text and text[-1] not in '.!?,;:。':
             text += '.'
         
         # Length limit

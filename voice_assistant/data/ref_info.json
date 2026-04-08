@@ -1,8 +1,25 @@
 {
   "default": {
-    "name": "Default Vietnamese Voice",
-    "text": "Xin chào, tôi là trợ lý ảo thông minh.",
-    "audio_path": "default_ref.wav",
-    "description": "Default reference voice"
+    "name": "Default Vietnamese Voice (Edge-TTS fallback)",
+    "text": null,
+    "audio_path": null,
+    "description": "Uses Edge-TTS fallback when no reference audio provided"
+  },
+  "_README": {
+    "description": "To use Qwen-TTS voice cloning, add speaker configs like this:",
+    "example": {
+      "my_voice": {
+        "name": "My Custom Voice",
+        "text": "Xin chào, đây là giọng nói của tôi.",
+        "audio_path": "/path/to/reference.wav",
+        "description": "My cloned voice from reference audio"
+      }
+    },
+    "notes": [
+      "audio_path: Path to 5-15 second WAV file of target voice",
+      "text: Transcript of what is said in the reference audio",
+      "Both audio_path and text are required for voice cloning",
+      "Without these, system falls back to Edge-TTS"
+    ]
   }
 }
