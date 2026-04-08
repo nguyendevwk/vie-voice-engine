@@ -75,15 +75,6 @@ class ASRService:
             except (ImportError, RuntimeError) as e:
                 logger.warning(f"PyTorch CUDA ASR not available: {e}")
 
-        # Try k2/icefall PyTorch
-        try:
-            from .asr_gipformer import GipformerASR
-            self._model = GipformerASR(device=self.device)
-            logger.info("Using PyTorch ASR (k2/icefall)")
-            return
-        except ImportError as e:
-            logger.warning(f"PyTorch ASR not available: {e}")
-
         # Fallback to Whisper
         logger.warning("Gipformer not available, using Whisper fallback")
         self._model = FallbackASR(device=self.device)
