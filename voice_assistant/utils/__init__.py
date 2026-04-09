@@ -12,8 +12,13 @@ from .text_utils import (
     normalize_for_tts,
     normalize_llm_output,
     clean_vietnamese_text,
-    split_into_sentences,
+    split_for_tts,
     remove_markdown,
+    strip_thinking_blocks,
+    remove_emojis,
+    expand_vietnamese_abbreviations,
+    TTSNormalizationConfig,
+    VIENEU_V2_TURBO_CONFIG,
 )
 
 __all__ = [
@@ -26,6 +31,11 @@ __all__ = [
     "normalize_for_tts",
     "normalize_llm_output",
     "clean_vietnamese_text",
-    "split_into_sentences",
+    "split_for_tts",
     "remove_markdown",
+    "strip_thinking_blocks",
+    "remove_emojis",
+    "expand_vietnamese_abbreviations",
+    "TTSNormalizationConfig",
+    "VIENEU_V2_TURBO_CONFIG",
 ]

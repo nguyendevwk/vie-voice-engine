@@ -9,7 +9,8 @@ from dataclasses import dataclass
 
 from ..config import settings
 from ..utils.logging import debug_log, log_llm_token, latency, logger
-from ..utils.text_utils import normalize_llm_output, split_into_sentences
+from ..utils.text_utils import normalize_llm_output, strip_thinking_blocks
+from .llm_extended import ExtendedLLMService
 
 
 @dataclass
@@ -17,6 +18,68 @@ class Message:
     """Chat message."""
     role: str  # system, user, assistant
     content: str
+
+
+class ExtendedLLMAdapter:
+    """Compatibility adapter so pipeline can use ExtendedLLMService transparently."""
+
+    def __init__(self, service: ExtendedLLMService):
+        self._service = service
+        self.model = settings.llm.model
+        self.max_tokens = settings.llm.max_tokens
+        self.temperature = settings.llm.temperature
+
+    def _normalize_history(self, history: Optional[List[Message]]) -> List[Dict[str, str]]:
+        if not history:
+            return []
+
+        normalized: List[Dict[str, str]] = []
+        for msg in history:
+            if isinstance(msg, dict):
+                role = msg.get("role")
+                content = msg.get("content")
+            else:
+                role = getattr(msg, "role", None)
+                content = getattr(msg, "content", None)
+
+            if role and content is not None:
+                normalized.append({"role": role, "content": str(content)})
+
+        return normalized
+
+    def _ensure_client(self):
+        """Warm up underlying provider client for API server startup."""
+        provider = getattr(self._service, "_provider", None)
+        if provider and hasattr(provider, "_ensure_client"):
+            provider._ensure_client()
+
+    async def generate_response(self, prompt: str, history: List[Message] = None) -> str:
+        return await self._service.generate_response(
+            prompt,
+            history=self._normalize_history(history),
+        )
+
+    async def generate_response_stream(
+        self,
+        prompt: str,
+        history: List[Message] = None,
+    ) -> AsyncIterator[str]:
+        async for sentence in self._service.generate_response_stream(
+            prompt,
+            history=self._normalize_history(history),
+        ):
+            yield sentence
+
+    async def generate_tokens(
+        self,
+        prompt: str,
+        history: List[Message] = None,
+    ) -> AsyncIterator[str]:
+        async for token in self._service.generate_tokens(
+            prompt,
+            history=self._normalize_history(history),
+        ):
+            yield token
 
 
 class LLMService:
@@ -75,7 +138,7 @@ class LLMService:
                 temperature=self.temperature,
             )
 
-        return response.choices[0].message.content
+        return normalize_llm_output(strip_thinking_blocks(response.choices[0].message.content or ""))
 
     async def generate_response_stream(
         self,
@@ -104,7 +167,55 @@ class LLMService:
 
         buffer = ""
         # Minimum sentence length for TTS (edge-tts fails on short texts)
-        MIN_SENTENCE_LENGTH = 20
+        MIN_SENTENCE_LENGTH = 5
+        is_first_chunk = True
+
+        THINK_START = "<think>"
+        THINK_END = "</think>"
+        thinking = False
+        pending = ""
+
+        def consume_char(char: str) -> str:
+            """Filter reasoning tags from the token stream and return visible text."""
+            nonlocal thinking, pending
+
+            if thinking:
+                pending += char
+                if THINK_END.startswith(pending):
+                    if pending == THINK_END:
+                        thinking = False
+                        pending = ""
+                    return ""
+
+                pending = pending if THINK_END.startswith(pending) else ""
+                return ""
+
+            pending += char
+
+            if THINK_START.startswith(pending):
+                if pending == THINK_START:
+                    thinking = True
+                    pending = ""
+                return ""
+
+            if pending and not THINK_START.startswith(pending):
+                # Emit the earliest character and keep checking for a tag prefix.
+                emitted = pending[0]
+                pending = pending[1:]
+                return emitted
+
+            return ""
+
+        def flush_pending() -> str:
+            """Flush any buffered visible text that is not part of a tag."""
+            nonlocal pending
+            if thinking or not pending:
+                return ""
+            if THINK_START.startswith(pending):
+                return ""
+            emitted = pending
+            pending = ""
+            return emitted
 
         async for chunk in stream:
             delta = chunk.choices[0].delta
@@ -116,31 +227,49 @@ class LLMService:
                     first_token = False
 
                 log_llm_token(token)
-                buffer += token
 
-                # Yield when we hit a sentence delimiter AND have enough text
-                for delim in self.SENTENCE_DELIMITERS:
-                    if delim in token:
-                        # Find last delimiter position
-                        last_pos = max(
-                            buffer.rfind(d) for d in self.SENTENCE_DELIMITERS
-                            if d in buffer
-                        )
-                        if last_pos > 0:
-                            sentence = buffer[:last_pos + 1].strip()
-                            remaining = buffer[last_pos + 1:].strip()
-                            
-                            # Only yield if sentence is long enough for TTS
-                            if len(sentence) >= MIN_SENTENCE_LENGTH:
-                                buffer = remaining
-                                if sentence:
-                                    yield sentence
-                            # Otherwise keep buffering
+                for char in token:
+                    visible_char = consume_char(char)
+                    if visible_char:
+                        buffer += visible_char
+
+                    # Also flush any buffered visible text that can no longer be a tag.
+                    flushed = flush_pending()
+                    if flushed:
+                        buffer += flushed
+
+                # Yield when we hit a sentence delimiter in visible text AND have enough text.
+                while True:
+                    last_pos = max(
+                        (buffer.rfind(d) for d in self.SENTENCE_DELIMITERS if d in buffer),
+                        default=-1,
+                    )
+                    if last_pos <= 0:
                         break
 
+                    sentence = buffer[:last_pos + 1].strip()
+                    remaining = buffer[last_pos + 1:].strip()
+
+                    # Only yield if sentence is long enough for TTS.
+                    if len(sentence) >= MIN_SENTENCE_LENGTH:
+                        buffer = remaining
+                        normalized = normalize_llm_output(strip_thinking_blocks(sentence))
+                        if normalized:
+                            yield normalized
+                        continue
+
+                    # Keep buffering if the visible chunk is too short.
+                    break
+
         # Yield remaining buffer (even if short, it's the last part)
+        trailing = flush_pending()
+        if trailing:
+            buffer += trailing
+
         if buffer.strip():
-            yield buffer.strip()
+            cleaned = normalize_llm_output(strip_thinking_blocks(buffer.strip()))
+            if cleaned:
+                yield cleaned
 
         if settings.debug:
             print()  # Newline after token stream
@@ -186,12 +315,23 @@ class LLMService:
 
 
 # Lazy singleton
-_llm_service: Optional[LLMService] = None
+_llm_service: Optional[object] = None
 
 
-def get_llm_service() -> LLMService:
+def get_llm_service() -> object:
     """Get or create LLM service singleton."""
     global _llm_service
     if _llm_service is None:
-        _llm_service = LLMService()
+        if settings.llm.use_extended:
+            try:
+                extended = ExtendedLLMService(
+                    auto_register_handlers=settings.llm.auto_register_task_handlers,
+                )
+                _llm_service = ExtendedLLMAdapter(extended)
+                logger.info("Using Extended LLM service with task routing")
+            except Exception as e:
+                logger.warning(f"Extended LLM unavailable, fallback to basic service: {e}")
+                _llm_service = LLMService()
+        else:
+            _llm_service = LLMService()
     return _llm_service

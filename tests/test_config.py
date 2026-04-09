@@ -72,9 +72,11 @@ class TestLLMConfig:
         config = LLMConfig()
 
         assert config.provider == "groq"
-        assert config.model == "llama-3.3-70b-versatile"
+        assert config.model == "qwen/qwen3-32b"
         assert config.max_tokens == 256
-        assert config.temperature == 0.7
+        assert config.temperature == 0.7  # Lower for more predictable TTS-friendly output
+        assert config.use_extended is True
+        assert config.auto_register_task_handlers is True
 
 
 class TestTTSConfig:
@@ -98,6 +100,9 @@ class TestPipelineConfig:
         assert config.min_verified_chunks == 3
         assert config.max_buffer_duration_ms == 15000
         assert config.interrupt_threshold_chunks == 6
+        assert config.llm_history_window == 8
+        assert config.min_tts_chunk_chars == 20
+        assert config.tts_overlap_enabled is True
 
 
 class TestSessionConfig:
@@ -141,12 +146,18 @@ class TestSettings:
         monkeypatch.setenv("ASR_DEVICE", "cuda:1")
         monkeypatch.setenv("DEBUG", "true")
         monkeypatch.setenv("SERVER_PORT", "9000")
+        monkeypatch.setenv("PIPELINE_LLM_HISTORY_WINDOW", "6")
+        monkeypatch.setenv("PIPELINE_MIN_TTS_CHUNK_CHARS", "16")
+        monkeypatch.setenv("PIPELINE_TTS_OVERLAP_ENABLED", "false")
 
         settings = Settings.from_env()
 
         assert settings.asr.device == "cuda:1"
         assert settings.debug == True
         assert settings.server.port == 9000
+        assert settings.pipeline.llm_history_window == 6
+        assert settings.pipeline.min_tts_chunk_chars == 16
+        assert settings.pipeline.tts_overlap_enabled is False
 
     def test_groq_api_key(self, monkeypatch):
         """Test GROQ_API_KEY loading."""
@@ -155,6 +166,16 @@ class TestSettings:
         settings = Settings.from_env()
 
         assert settings.llm.api_key == "test-key-123"
+
+    def test_llm_extended_flags(self, monkeypatch):
+        """Test extended LLM toggle flags from environment."""
+        monkeypatch.setenv("LLM_USE_EXTENDED", "false")
+        monkeypatch.setenv("LLM_AUTO_REGISTER_TASK_HANDLERS", "false")
+
+        settings = Settings.from_env()
+
+        assert settings.llm.use_extended is False
+        assert settings.llm.auto_register_task_handlers is False
 
 
 if __name__ == "__main__":

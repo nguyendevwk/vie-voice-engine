@@ -25,10 +25,10 @@ from .llm_base import (
 class OpenAICompatibleProvider(BaseLLMProvider):
     """
     Provider for OpenAI-compatible APIs.
-    
+
     Works with OpenAI, Groq, Together AI, Anyscale, vLLM, etc.
     """
-    
+
     def __init__(
         self,
         api_key: str,
@@ -45,7 +45,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         self.max_tokens = max_tokens
         self.extra_kwargs = kwargs
         self._client = None
-    
+
     def _ensure_client(self):
         """Lazy initialize client."""
         if self._client is None:
@@ -54,7 +54,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
                 api_key=self.api_key,
                 base_url=self.base_url,
             )
-    
+
     async def generate(
         self,
         messages: List[Dict[str, str]],
@@ -62,7 +62,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
     ) -> LLMResponse:
         """Generate complete response."""
         self._ensure_client()
-        
+
         response = await self._client.chat.completions.create(
             model=kwargs.get("model", self.model),
             messages=messages,
@@ -70,7 +70,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
             temperature=kwargs.get("temperature", self.temperature),
             **self.extra_kwargs
         )
-        
+
         choice = response.choices[0]
         return LLMResponse(
             content=choice.message.content or "",
@@ -83,7 +83,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
             } if response.usage else None,
             raw=response
         )
-    
+
     async def generate_stream(
         self,
         messages: List[Dict[str, str]],
@@ -91,7 +91,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
     ) -> AsyncIterator[str]:
         """Stream response tokens."""
         self._ensure_client()
-        
+
         stream = await self._client.chat.completions.create(
             model=kwargs.get("model", self.model),
             messages=messages,
@@ -100,14 +100,14 @@ class OpenAICompatibleProvider(BaseLLMProvider):
             stream=True,
             **self.extra_kwargs
         )
-        
+
         async for chunk in stream:
             if chunk.choices and chunk.choices[0].delta.content:
                 yield chunk.choices[0].delta.content
-    
+
     def supports_tools(self) -> bool:
         return True
-    
+
     async def generate_with_tools(
         self,
         messages: List[Dict[str, str]],
@@ -116,9 +116,9 @@ class OpenAICompatibleProvider(BaseLLMProvider):
     ) -> LLMResponse:
         """Generate with tool calling."""
         self._ensure_client()
-        
+
         tool_defs = [t.to_dict() for t in tools]
-        
+
         response = await self._client.chat.completions.create(
             model=kwargs.get("model", self.model),
             messages=messages,
@@ -127,10 +127,10 @@ class OpenAICompatibleProvider(BaseLLMProvider):
             max_tokens=kwargs.get("max_tokens", self.max_tokens),
             temperature=kwargs.get("temperature", self.temperature),
         )
-        
+
         choice = response.choices[0]
         tool_calls = None
-        
+
         if choice.message.tool_calls:
             tool_calls = [
                 {
@@ -143,14 +143,14 @@ class OpenAICompatibleProvider(BaseLLMProvider):
                 }
                 for tc in choice.message.tool_calls
             ]
-        
+
         return LLMResponse(
             content=choice.message.content or "",
             finish_reason=choice.finish_reason,
             tool_calls=tool_calls,
             raw=response
         )
-    
+
     def get_model_info(self) -> Dict[str, Any]:
         return {
             "name": self.model,
@@ -164,18 +164,18 @@ class OpenAICompatibleProvider(BaseLLMProvider):
 class GroqProvider(OpenAICompatibleProvider):
     """
     Groq API provider with fast inference.
-    
+
     Supported models:
     - llama-3.3-70b-versatile (recommended)
     - llama-3.1-8b-instant
     - mixtral-8x7b-32768
     - gemma2-9b-it
     """
-    
+
     def __init__(
         self,
         api_key: str,
-        model: str = "llama-3.3-70b-versatile",
+        model: str = "qwen/qwen3-32b",
         **kwargs
     ):
         super().__init__(
@@ -184,7 +184,7 @@ class GroqProvider(OpenAICompatibleProvider):
             model=model,
             **kwargs
         )
-    
+
     def get_model_info(self) -> Dict[str, Any]:
         return {
             "name": self.model,
@@ -198,14 +198,14 @@ class GroqProvider(OpenAICompatibleProvider):
 class OpenAIProvider(OpenAICompatibleProvider):
     """
     OpenAI API provider.
-    
+
     Supported models:
     - gpt-4o (recommended)
     - gpt-4o-mini (faster)
     - gpt-4-turbo
     - gpt-3.5-turbo
     """
-    
+
     def __init__(
         self,
         api_key: str,
@@ -218,10 +218,10 @@ class OpenAIProvider(OpenAICompatibleProvider):
             model=model,
             **kwargs
         )
-    
+
     def supports_vision(self) -> bool:
         return "4o" in self.model or "vision" in self.model
-    
+
     def get_model_info(self) -> Dict[str, Any]:
         return {
             "name": self.model,
@@ -235,10 +235,10 @@ class OpenAIProvider(OpenAICompatibleProvider):
 class OllamaProvider(BaseLLMProvider):
     """
     Ollama provider for local model inference.
-    
+
     Install: https://ollama.ai
     Pull models: ollama pull llama3
-    
+
     Supported models (examples):
     - llama3 (recommended)
     - mistral
@@ -246,7 +246,7 @@ class OllamaProvider(BaseLLMProvider):
     - qwen2
     - phi3
     """
-    
+
     def __init__(
         self,
         model: str = "llama3",
@@ -258,7 +258,7 @@ class OllamaProvider(BaseLLMProvider):
         self.base_url = base_url.rstrip("/")
         self.temperature = temperature
         self.extra_kwargs = kwargs
-    
+
     async def generate(
         self,
         messages: List[Dict[str, str]],
@@ -266,7 +266,7 @@ class OllamaProvider(BaseLLMProvider):
     ) -> LLMResponse:
         """Generate using Ollama API."""
         import httpx
-        
+
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
                 f"{self.base_url}/api/chat",
@@ -282,7 +282,7 @@ class OllamaProvider(BaseLLMProvider):
             )
             response.raise_for_status()
             data = response.json()
-        
+
         return LLMResponse(
             content=data["message"]["content"],
             finish_reason="stop",
@@ -290,13 +290,13 @@ class OllamaProvider(BaseLLMProvider):
                 "prompt_tokens": data.get("prompt_eval_count", 0),
                 "completion_tokens": data.get("eval_count", 0),
                 "total_tokens": (
-                    data.get("prompt_eval_count", 0) + 
+                    data.get("prompt_eval_count", 0) +
                     data.get("eval_count", 0)
                 ),
             },
             raw=data
         )
-    
+
     async def generate_stream(
         self,
         messages: List[Dict[str, str]],
@@ -305,7 +305,7 @@ class OllamaProvider(BaseLLMProvider):
         """Stream response from Ollama."""
         import httpx
         import json
-        
+
         async with httpx.AsyncClient(timeout=60.0) as client:
             async with client.stream(
                 "POST",
@@ -325,7 +325,7 @@ class OllamaProvider(BaseLLMProvider):
                         data = json.loads(line)
                         if "message" in data and "content" in data["message"]:
                             yield data["message"]["content"]
-    
+
     def get_model_info(self) -> Dict[str, Any]:
         return {
             "name": self.model,
@@ -340,9 +340,9 @@ class OllamaProvider(BaseLLMProvider):
 class CustomAPIProvider(BaseLLMProvider):
     """
     Custom API provider for any endpoint.
-    
+
     Use this as a base for integrating custom LLM APIs.
-    
+
     Example:
         >>> provider = CustomAPIProvider(
         ...     endpoint="https://my-api.com/generate",
@@ -351,7 +351,7 @@ class CustomAPIProvider(BaseLLMProvider):
         ...     response_parser=lambda r: r["text"]
         ... )
     """
-    
+
     def __init__(
         self,
         endpoint: str,
@@ -367,7 +367,7 @@ class CustomAPIProvider(BaseLLMProvider):
         self.response_parser = response_parser or self._default_response
         self.stream_parser = stream_parser
         self.extra_kwargs = kwargs
-    
+
     def _default_request(self, messages: List[Dict], **kwargs) -> Dict:
         """Default request format (OpenAI-compatible)."""
         return {
@@ -376,7 +376,7 @@ class CustomAPIProvider(BaseLLMProvider):
             **self.extra_kwargs,
             **kwargs
         }
-    
+
     def _default_response(self, data: Dict) -> str:
         """Default response parser."""
         if "choices" in data:
@@ -388,7 +388,7 @@ class CustomAPIProvider(BaseLLMProvider):
         elif "response" in data:
             return data["response"]
         return str(data)
-    
+
     async def generate(
         self,
         messages: List[Dict[str, str]],
@@ -396,9 +396,9 @@ class CustomAPIProvider(BaseLLMProvider):
     ) -> LLMResponse:
         """Generate using custom API."""
         import httpx
-        
+
         request_data = self.request_format(messages, **kwargs)
-        
+
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
                 self.endpoint,
@@ -407,15 +407,15 @@ class CustomAPIProvider(BaseLLMProvider):
             )
             response.raise_for_status()
             data = response.json()
-        
+
         content = self.response_parser(data)
-        
+
         return LLMResponse(
             content=content,
             finish_reason="stop",
             raw=data
         )
-    
+
     async def generate_stream(
         self,
         messages: List[Dict[str, str]],
@@ -424,9 +424,9 @@ class CustomAPIProvider(BaseLLMProvider):
         """Stream from custom API."""
         import httpx
         import json
-        
+
         request_data = self.request_format(messages, stream=True, **kwargs)
-        
+
         async with httpx.AsyncClient(timeout=60.0) as client:
             async with client.stream(
                 "POST",
@@ -450,7 +450,7 @@ class CustomAPIProvider(BaseLLMProvider):
                                 yield text
                         except json.JSONDecodeError:
                             continue
-    
+
     def get_model_info(self) -> Dict[str, Any]:
         return {
             "name": "custom",
@@ -494,15 +494,15 @@ def _auto_register_providers():
     """Auto-register providers based on available API keys."""
     from ..config import settings
     import os
-    
+
     # Groq (primary)
     if settings.llm.api_key:
         register_provider("groq", create_groq_provider())
-    
+
     # OpenAI (secondary)
     if os.getenv("OPENAI_API_KEY"):
         register_provider("openai", create_openai_provider())
-    
+
     # Ollama (local fallback)
     try:
         import httpx

@@ -24,7 +24,7 @@ from .llm_tasks import register_all_handlers
 
 from ..config import settings
 from ..utils.logging import logger, debug_log, latency
-from ..utils.text_utils import normalize_llm_output
+from ..utils.text_utils import normalize_llm_output, strip_thinking_blocks
 
 
 class ExtendedLLMService:
@@ -96,7 +96,7 @@ class ExtendedLLMService:
         # Configuration
         self.max_tokens = settings.llm.max_tokens
         self.temperature = settings.llm.temperature
-        self.timeout = settings.pipeline.llm_timeout
+        self.timeout = settings.pipeline.llm_timeout_s
     
     def set_provider(self, name: str) -> bool:
         """
@@ -255,12 +255,86 @@ class ExtendedLLMService:
         if not self._provider:
             yield "LLM not configured"
             return
-        
-        messages = self._build_messages(prompt, history, **kwargs)
+
+        # Apply task routing for streaming path as well.
+        system_prompt = None
+        routed_query = prompt
+        context = TaskContext(
+            user_query=prompt,
+            history=history or [],
+            session_data=kwargs.get("session_data", {}),
+            metadata=kwargs,
+        )
+        handler = self._registry.find_handler(context)
+
+        if handler:
+            debug_log(f"Using handler for stream: {handler.name}")
+            response = await handler.handle(context)
+
+            if response.status == TaskResult.SUCCESS:
+                normalized = normalize_llm_output(response.content)
+                if normalized:
+                    yield normalized
+                return
+
+            if response.status == TaskResult.DELEGATED:
+                routed_query = response.content
+                system_prompt = handler.get_system_prompt() or None
+
+        messages = self._build_messages(
+            routed_query,
+            history,
+            system_prompt=system_prompt,
+            **kwargs,
+        )
         
         latency.start("llm_first_token")
         first_token = True
         buffer = ""
+
+        THINK_START = "<think>"
+        THINK_END = "</think>"
+        thinking = False
+        pending = ""
+
+        def consume_char(char: str) -> str:
+            nonlocal thinking, pending
+
+            if thinking:
+                pending += char
+                if THINK_END.startswith(pending):
+                    if pending == THINK_END:
+                        thinking = False
+                        pending = ""
+                    return ""
+
+                pending = pending if THINK_END.startswith(pending) else ""
+                return ""
+
+            pending += char
+
+            if THINK_START.startswith(pending):
+                if pending == THINK_START:
+                    thinking = True
+                    pending = ""
+                return ""
+
+            if pending and not THINK_START.startswith(pending):
+                emitted = pending[0]
+                pending = pending[1:]
+                return emitted
+
+            return ""
+
+        def flush_pending() -> str:
+            nonlocal pending
+            if thinking or not pending:
+                return ""
+            if THINK_START.startswith(pending):
+                return ""
+            emitted = pending
+            pending = ""
+            return emitted
         
         async for token in self._provider.generate_stream(
             messages,
@@ -271,28 +345,38 @@ class ExtendedLLMService:
                 latency.end("llm_first_token")
                 first_token = False
             
-            buffer += token
+            for char in token:
+                visible_char = consume_char(char)
+                if visible_char:
+                    buffer += visible_char
+
+                flushed = flush_pending()
+                if flushed:
+                    buffer += flushed
             
             # Check for sentence delimiters
-            for delim in self.SENTENCE_DELIMITERS:
-                if delim in token:
-                    last_pos = max(
-                        buffer.rfind(d) for d in self.SENTENCE_DELIMITERS
-                        if d in buffer
-                    )
-                    if last_pos > 0:
-                        sentence = buffer[:last_pos + 1].strip()
-                        buffer = buffer[last_pos + 1:].strip()
-                        if sentence:
-                            # Normalize for TTS
-                            normalized = normalize_llm_output(sentence)
-                            if normalized:
-                                yield normalized
+            while True:
+                last_pos = max(
+                    (buffer.rfind(d) for d in self.SENTENCE_DELIMITERS if d in buffer),
+                    default=-1,
+                )
+                if last_pos <= 0:
                     break
+
+                sentence = buffer[:last_pos + 1].strip()
+                buffer = buffer[last_pos + 1:].strip()
+                if sentence:
+                    normalized = normalize_llm_output(strip_thinking_blocks(sentence))
+                    if normalized:
+                        yield normalized
         
         # Yield remaining buffer
+        trailing = flush_pending()
+        if trailing:
+            buffer += trailing
+
         if buffer.strip():
-            normalized = normalize_llm_output(buffer.strip())
+            normalized = normalize_llm_output(strip_thinking_blocks(buffer.strip()))
             if normalized:
                 yield normalized
     

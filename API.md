@@ -393,6 +393,24 @@ Event emitted by pipeline.
 
 ---
 
+## WebSocket Client Messages
+
+### `client_config`
+
+Set client preferences for the WebSocket session.
+
+```json
+{
+  "type": "client_config",
+  "audio_format": "binary"  // "binary" or "base64"
+}
+```
+
+When `audio_format` is `"binary"`, the server sends TTS audio as binary WebSocket frames.
+If omitted, the server defaults to base64-encoded audio in JSON.
+
+---
+
 ## Utilities
 
 ### Text Normalization

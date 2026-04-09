@@ -9,10 +9,10 @@ description = "Real-time Vietnamese Voice Assistant with ASR, LLM, and TTS strea
 readme = "README.md"
 license = {file = "LICENSE"}
 authors = [
-    {name = "nguyendevwk", email = "phamnguyen.devwk@gmail.com"}
+    {name = "nguyendevwk"}
 ]
 maintainers = [
-    {name = "nguyendevwk", email = "phamnguyen.devwk@gmail.com"}
+    {name = "nguyendevwk"}
 ]
 keywords = [
     "voice-assistant",

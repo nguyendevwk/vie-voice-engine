@@ -32,38 +32,11 @@ def prepare_text_for_tts(text: str) -> str:
     """
     Clean and prepare text for TTS synthesis.
     Handles markdown, special chars, minimum length.
+    
+    Optimized for VieNeu-TTS-v2 Turbo.
     """
-    if not text or not text.strip():
-        return ""
-
-    text = text.strip()
-
-    # Remove markdown bullets
-    text = re.sub(r'^[\*\+\-•]\s*', '', text)
-    text = re.sub(r'^\d+[\.\)]\s*', '', text)
-
-    # Remove markdown emphasis
-    text = re.sub(r'\*+', '', text)
-    text = re.sub(r'_+', '', text)
-
-    # Remove URLs
-    text = re.sub(r'https?://\S+', '', text)
-
-    # Remove Cyrillic (common LLM garbage)
-    text = re.sub(r'[а-яА-ЯёЁ]', '', text)
-
-    # Clean whitespace
-    text = re.sub(r'\s+', ' ', text).strip()
-
-    # Skip if too short
-    if len(text) < 5:
-        return ""
-
-    # Ensure ending punctuation
-    if text and text[-1] not in '.!?。':
-        text += '.'
-
-    return text
+    from ..utils.text_utils import normalize_for_tts
+    return normalize_for_tts(text)
 
 
 def split_sentences(text: str, max_length: int = 150) -> List[str]:
@@ -149,10 +122,20 @@ class VieNeuTTSProvider(BaseTTSProvider):
     """
     VieNeu-TTS provider for fast, CPU-friendly synthesis.
 
-    Optimized for:
-    - Low-end hardware / CPU-only
-    - Real-time applications
-    - Offline usage
+    🚀 Supports TWO modes:
+    1. LOCAL (turbo): VieNeu-TTS-v2 Turbo - runs locally on CPU
+    2. REMOTE: Lightweight client connecting to VieNeu server
+
+    LOCAL mode (vieneu):
+    - Runs locally, no network needed
+    - CPU-friendly, ~300MB memory
+    - Latency: 100-500ms
+
+    REMOTE mode (vieneu_remote):
+    - Lightweight client (~50MB), server does heavy lifting
+    - Optimal for Docker/low-end hardware
+    - Latency: depends on network (typically 200-800ms)
+    - Requires: VIENEU_REMOTE_API_BASE, VIENEU_REMOTE_MODEL_ID
 
     Install: pip install vieneu
     """
@@ -162,10 +145,16 @@ class VieNeuTTSProvider(BaseTTSProvider):
     requires_gpu = False
     is_online = False
 
-    def __init__(self, voice: str = None):
+    def __init__(
+        self,
+        voice: str = None,
+        mode: str = None,  # turbo, standard, fast, turbo_gpu, remote
+    ):
         self.voice = voice  # Preset voice ID
+        self.mode = mode or settings.tts.vieneu_mode
         self._tts = None
         self._voice_data = None
+        self._load_error: Optional[str] = None  # Store load errors
 
     def _ensure_loaded(self):
         """Lazy load VieNeu-TTS."""
@@ -175,8 +164,38 @@ class VieNeuTTSProvider(BaseTTSProvider):
         try:
             from vieneu import Vieneu
 
-            logger.info("Loading VieNeu-TTS (Turbo mode)...")
-            self._tts = Vieneu()  # Defaults to Turbo mode
+            # Check if using remote mode
+            if self.mode == "remote" or settings.tts.backend == "vieneu_remote":
+                # Remote mode - lightweight client
+                api_base = settings.tts.vieneu_remote_api_base
+                model_id = settings.tts.vieneu_remote_model_id
+                logger.info(f"🚀 Loading VieNeu-TTS Remote mode: {api_base}")
+                self._tts = Vieneu(
+                    mode='remote',
+                    api_base=api_base,
+                    model_name=model_id
+                )
+                self.is_online = True
+                logger.info(f"✅ VieNeu-TTS Remote loaded (model={model_id})")
+            else:
+                # Local mode - VieNeu-TTS-v2 Turbo
+                logger.info(f"🚀 Loading VieNeu-TTS Local (mode={self.mode})...")
+                logger.info("🚀 Using VieNeu-TTS-v2 Turbo - Optimized for edge devices!")
+                
+                # Load with appropriate mode
+                if self.mode == "turbo":
+                    # VieNeu-TTS-v2 Turbo with custom model paths
+                    self._tts = Vieneu(
+                        mode=self.mode,
+                        backbone_repo=settings.tts.vieneu_model_backbone,
+                        decoder_repo=settings.tts.vieneu_model_decoder,
+                        encoder_repo=settings.tts.vieneu_model_encoder,
+                    )
+                else:
+                    # Other modes use default models
+                    self._tts = Vieneu(mode=self.mode)
+
+                logger.info(f"✅ VieNeu-TTS-v2 Turbo loaded successfully (mode={self.mode})")
 
             # Get preset voice if specified
             if self.voice:
@@ -186,17 +205,48 @@ class VieNeuTTSProvider(BaseTTSProvider):
                 except Exception as e:
                     logger.warning(f"Voice '{self.voice}' not found: {e}")
 
-            logger.info("VieNeu-TTS loaded successfully")
+        except ImportError as e:
+            error_msg = str(e)
+            self._load_error = error_msg
+            
+            # Provide helpful error messages
+            if "remote" in self.mode.lower() or "api" in error_msg.lower():
+                logger.error(
+                    f"VieNeu-TTS Remote mode failed: {error_msg}. "
+                    f"Check VIENEU_REMOTE_API_BASE is accessible"
+                )
+            elif "lmdeploy" in error_msg.lower():
+                logger.error(
+                    f"VieNeu-TTS '{self.mode}' mode requires lmdeploy. "
+                    f"Install with: pip install vieneu[gpu] or use 'turbo' mode instead"
+                )
+            elif "torch" in error_msg.lower():
+                logger.error(
+                    f"VieNeu-TTS '{self.mode}' mode requires PyTorch. "
+                    f"Install with: pip install torch or use 'turbo' mode instead"
+                )
+            else:
+                logger.error(f"Failed to load VieNeu-TTS: {error_msg}")
+            raise
 
-        except ImportError:
-            raise ImportError(
-                "VieNeu-TTS not installed. Install with: pip install vieneu"
-            )
+        except Exception as e:
+            self._load_error = str(e)
+            logger.error(f"Failed to load VieNeu-TTS (mode={self.mode}): {e}")
+            raise
 
     def is_available(self) -> bool:
+        """Check if provider is available."""
         try:
             import vieneu
-            return True
+            # Try to load to check availability
+            if self._tts is None and self._load_error is None:
+                # Haven't tried loading yet, attempt it
+                try:
+                    self._ensure_loaded()
+                    return True
+                except Exception:
+                    return False
+            return self._tts is not None
         except ImportError:
             return False
 
@@ -216,11 +266,23 @@ class VieNeuTTSProvider(BaseTTSProvider):
             except:
                 pass
 
-        # Synthesize
+        # Support reference audio for zero-shot voice cloning
+        ref_audio = kwargs.get("ref_audio")
+        ref_text = kwargs.get("ref_text")
+
         with latency.track("tts_vieneu"):
-            if voice_data:
+            if ref_audio and ref_text:
+                # Zero-shot voice cloning
+                audio = self._tts.infer(
+                    text=text,
+                    ref_audio=ref_audio,
+                    ref_text=ref_text,
+                )
+            elif voice_data:
+                # Use preset voice
                 audio = self._tts.infer(text=text, voice=voice_data)
             else:
+                # Default voice
                 audio = self._tts.infer(text=text)
 
         # VieNeu outputs at 24kHz
@@ -537,43 +599,78 @@ class TTSService:
 
         # Try requested backend
         if backend == "vieneu":
-            provider = VieNeuTTSProvider()
-            if provider.is_available():
-                self._provider = provider
-                logger.info("Using VieNeu-TTS")
-                return self._provider
+            try:
+                provider = VieNeuTTSProvider()
+                if provider.is_available():
+                    self._provider = provider
+                    logger.info(f"Using VieNeu-TTS Local (mode={settings.tts.vieneu_mode})")
+                    return self._provider
+            except Exception as e:
+                logger.warning(f"VieNeu-TTS Local not available: {e}")
+
+        elif backend == "vieneu_remote":
+            try:
+                provider = VieNeuTTSProvider(mode="remote")
+                if provider.is_available():
+                    self._provider = provider
+                    self._fallback = EdgeTTSProvider(speech_rate=self.speech_rate)
+                    logger.info(f"🚀 Using VieNeu-TTS Remote: {settings.tts.vieneu_remote_api_base}")
+                    return self._provider
+            except Exception as e:
+                logger.warning(f"VieNeu-TTS Remote not available: {e}")
+                logger.info("Falling back to Edge-TTS")
 
         elif backend == "qwen":
-            provider = QwenTTSProvider()
-            if provider.is_available():
-                self._provider = provider
-                logger.info("Using Qwen-TTS")
-                return self._provider
+            try:
+                provider = QwenTTSProvider()
+                if provider.is_available():
+                    self._provider = provider
+                    logger.info("Using Qwen-TTS")
+                    return self._provider
+            except Exception as e:
+                logger.warning(f"Qwen-TTS not available: {e}")
 
         elif backend == "edge":
             self._provider = EdgeTTSProvider(speech_rate=self.speech_rate)
             logger.info("Using Edge-TTS")
             return self._provider
 
-        # Auto mode: try providers in order
+        # Auto mode: try providers in order for optimal latency
         if backend == "auto":
-            # 1. VieNeu-TTS (CPU-friendly)
-            vieneu = VieNeuTTSProvider()
-            if vieneu.is_available():
-                self._provider = vieneu
-                self._fallback = EdgeTTSProvider(speech_rate=self.speech_rate)
-                logger.info("Using VieNeu-TTS (auto)")
-                return self._provider
+            # 1. VieNeu-TTS Remote (lightest client, optimal for Docker)
+            try:
+                vieneu_remote = VieNeuTTSProvider(mode="remote")
+                if vieneu_remote.is_available():
+                    self._provider = vieneu_remote
+                    self._fallback = EdgeTTSProvider(speech_rate=self.speech_rate)
+                    logger.info(f"🚀 Using VieNeu-TTS Remote (auto): {settings.tts.vieneu_remote_api_base}")
+                    return self._provider
+            except Exception:
+                pass
 
-            # 2. Qwen-TTS (GPU)
-            qwen = QwenTTSProvider()
-            if qwen.is_available():
-                self._provider = qwen
-                self._fallback = EdgeTTSProvider(speech_rate=self.speech_rate)
-                logger.info("Using Qwen-TTS (auto)")
-                return self._provider
+            # 2. VieNeu-TTS Local v2 Turbo (CPU-friendly)
+            try:
+                vieneu = VieNeuTTSProvider()
+                if vieneu.is_available():
+                    self._provider = vieneu
+                    self._fallback = EdgeTTSProvider(speech_rate=self.speech_rate)
+                    logger.info(f"Using VieNeu-TTS Local v2 Turbo (auto)")
+                    return self._provider
+            except Exception:
+                pass
 
-        # 3. Edge-TTS fallback
+            # 3. Qwen-TTS (GPU)
+            try:
+                qwen = QwenTTSProvider()
+                if qwen.is_available():
+                    self._provider = qwen
+                    self._fallback = EdgeTTSProvider(speech_rate=self.speech_rate)
+                    logger.info("Using Qwen-TTS (auto)")
+                    return self._provider
+            except Exception:
+                pass
+
+        # 4. Edge-TTS fallback
         self._provider = EdgeTTSProvider(speech_rate=self.speech_rate)
         logger.info("Using Edge-TTS (fallback)")
         return self._provider
@@ -589,6 +686,13 @@ class TTSService:
         Returns:
             PCM S16LE audio bytes at target sample rate
         """
+        from ..utils.text_utils import normalize_for_tts
+
+        # Normalize text before synthesis
+        text = normalize_for_tts(text)
+        if not text:
+            return b""
+
         provider = self._get_provider()
         speaker = speaker or self.default_speaker
 

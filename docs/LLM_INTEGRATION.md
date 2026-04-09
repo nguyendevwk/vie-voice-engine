@@ -306,4 +306,3 @@ def can_handle(self, context):
 
 ---
 
-*Author: nguyendevwk | License: MIT*
