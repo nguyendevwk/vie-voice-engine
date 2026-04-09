@@ -26,6 +26,19 @@ Audio Input → VAD → ASR → LLM → TTS → Audio Output
 
 ## Installation
 
+### Prerequisites
+
+```bash
+# Ubuntu/Debian - Install PortAudio for microphone support
+sudo apt-get install portaudio19-dev
+
+# Fedora/RHEL
+sudo dnf install portaudio-devel
+
+# macOS
+brew install portaudio
+```
+
 ### With uv (Recommended)
 
 ```bash
@@ -75,6 +88,13 @@ ASR_DEVICE=auto
 
 # TTS: auto, vieneu, qwen, edge
 TTS_BACKEND=auto
+
+# VieNeu-TTS v2 Turbo Configuration (recommended for speed)
+# 🚀 Optimized for edge devices and extremely fast inference!
+VIENEU_MODE=turbo
+VIENEU_MODEL_BACKBONE=pnnbao-ump/VieNeu-TTS-v2-Turbo-GGUF
+VIENEU_MODEL_DECODER=pnnbao-ump/VieNeu-Codec
+VIENEU_MODEL_ENCODER=pnnbao-ump/VieNeu-Codec
 TTS_SPEECH_RATE=1.25
 
 # Server
@@ -84,7 +104,28 @@ DEBUG=false
 
 ## Usage
 
-### Web UI
+### Docker (Recommended for Production)
+
+```bash
+# Copy environment file
+cp .env.docker.example .env
+# Edit .env with your GROQ_API_KEY
+
+# Build and run
+docker-compose up -d
+
+# View logs
+docker-compose logs -f
+
+# Stop
+docker-compose down
+```
+
+Access at `http://localhost:8000`
+
+### Local Development
+
+#### Web UI
 
 ```bash
 # With uv
@@ -96,7 +137,7 @@ python -m voice_assistant.api.server
 # Open http://localhost:8000
 ```
 
-### CLI
+#### CLI
 
 ```bash
 # Voice mode
@@ -113,10 +154,10 @@ from voice_assistant.core.pipeline import PipelineOrchestrator
 
 async def main():
     orchestrator = PipelineOrchestrator()
-    
+
     # Process audio
     await orchestrator.handle_audio_chunk(audio_bytes)
-    
+
     # Or text
     async for event in orchestrator.process_text("Xin chào"):
         print(event.type, event.data)
@@ -140,13 +181,25 @@ voice_assistant/
 
 ## TTS Backends
 
-| Backend | Hardware | Quality | Offline |
-|---------|----------|---------|---------|
-| VieNeu-TTS | CPU | Good | Yes |
-| Qwen-TTS | GPU (4-6GB) | Best | Yes |
-| Edge-TTS | Any | Good | No |
+| Backend | Hardware | Quality | Speed | Offline |
+|---------|----------|---------|-------|---------|
+| **VieNeu-TTS v2 Turbo** 🚀 | CPU | Good | ⚡⚡⚡⚡⚡ | Yes |
+| VieNeu-TTS Standard | CPU/GPU | Better | ⚡⚡⚡ | Yes |
+| Qwen-TTS | GPU (4-6GB) | Best | ⚡⚡ | Yes |
+| Edge-TTS | Any | Good | ⚡⚡ | No |
 
-Install VieNeu-TTS for CPU-only: `pip install vieneu`
+**🚀 VieNeu-TTS-v2 Turbo:**
+- Optimized for edge devices and extremely fast inference
+- Perfect for CPU-only and low-end devices
+- ⚠️ Note: May struggle with very short segments (< 5 words)
+- Version VieNeu-TTS-v2 (Non-Turbo) coming soon!
+
+**Quick setup:**
+```bash
+# Use VieNeu-TTS v2 Turbo (fastest, recommended for speed)
+TTS_BACKEND=vieneu
+VIENEU_MODE=turbo
+```
 
 ## Performance
 

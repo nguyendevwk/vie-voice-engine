@@ -1,0 +1,69 @@
+version: '3.8'
+
+services:
+  voice-assistant:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: voice-assistant-vie:latest
+    container_name: voice-assistant
+    restart: unless-stopped
+    
+    ports:
+      - "8000:8000"
+    
+    environment:
+      # LLM
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - LLM_PROVIDER=${LLM_PROVIDER:-groq}
+      - LLM_MODEL=${LLM_MODEL:-qwen/qwen3-32b}
+
+      # ASR
+      - ASR_USE_ONNX=${ASR_USE_ONNX:-true}
+      - ASR_DEVICE=${ASR_DEVICE:-cpu}
+
+      # TTS - Remote mode for optimal latency
+      # IMPORTANT: Choose the right URL for your setup:
+      # - Docker Desktop (Mac/Windows): host.docker.internal
+      # - Docker on Linux: 172.17.0.1 (bridge) OR use --network host
+      # - Local dev: localhost
+      - TTS_BACKEND=${TTS_BACKEND:-vieneu_remote}
+      - VIENEU_REMOTE_API_BASE=${VIENEU_REMOTE_API_BASE:-http://host.docker.internal:23333/v1}
+      - VIENEU_REMOTE_MODEL_ID=${VIENEU_REMOTE_MODEL_ID:-pnnbao-ump/VieNeu-TTS}
+      - TTS_SPEECH_RATE=${TTS_SPEECH_RATE:-1.25}
+
+      # Server
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8000
+      - DEBUG=${DEBUG:-false}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+
+    # For Linux Docker: uncomment to use host network (simplest for localhost access)
+    # network_mode: host
+    
+    volumes:
+      # Cache for models
+      - model-cache:/home/assistant/.cache
+      # Session storage (optional)
+      - ./sessions:/app/sessions
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    
+    # Resource limits (adjust based on your needs)
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+        reservations:
+          cpus: '2'
+          memory: 4G
+
+volumes:
+  model-cache:
+    driver: local
