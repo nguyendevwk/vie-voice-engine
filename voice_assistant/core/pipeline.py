@@ -269,97 +269,135 @@ class PipelineOrchestrator:
 
             # Stream LLM → TTS with timeout
             full_response = ""
-            tts_duration_ms = 0
+            tts_duration_ms = 0.0
             sentence_count = 0
-            
+            partial_response_count = 0
+            tts_chunk_count = 0
+            tts_synth_wall_ms = 0.0
+            stream_start = time.perf_counter()
+            llm_stream_total_ms = 0.0
+
+            history_window = max(2, settings.pipeline.llm_history_window)
+            min_tts_length = max(8, settings.pipeline.min_tts_chunk_chars)
+            overlap_tts = settings.pipeline.tts_overlap_enabled
+
             # Start LLM stream
             llm_start = time.time()
             llm_timeout_reached = False
-            
-            # Buffer for short sentences (edge-tts fails on short texts < 20 chars)
-            MIN_TTS_LENGTH = 25  # Increased for better stability
+
+            # Buffer for short sentences (helps TTS stability for tiny chunks)
             sentence_buffer = ""
-            
+
+            tts_queue: Optional[asyncio.Queue] = None
+            tts_worker_task: Optional[asyncio.Task] = None
+
+            async def synthesize_and_emit(text: str):
+                nonlocal tts_duration_ms, sentence_count, tts_chunk_count, tts_synth_wall_ms
+                synth_start = time.perf_counter()
+                try:
+                    audio_bytes = await asyncio.wait_for(
+                        self.tts.synthesize(text),
+                        timeout=settings.pipeline.tts_timeout_s,
+                    )
+                    tts_synth_wall_ms += (time.perf_counter() - synth_start) * 1000
+                    tts_chunk_count += 1
+
+                    if audio_bytes and not self._should_interrupt:
+                        tts_duration_ms += self.tts.get_audio_duration_ms(audio_bytes)
+                        await self._emit("audio", audio_bytes)
+                except asyncio.TimeoutError:
+                    tts_synth_wall_ms += (time.perf_counter() - synth_start) * 1000
+                    tts_chunk_count += 1
+                    logger.warning(f"TTS timeout for sentence {sentence_count}")
+                except Exception as e:
+                    tts_synth_wall_ms += (time.perf_counter() - synth_start) * 1000
+                    tts_chunk_count += 1
+                    logger.error(f"TTS error: {e}")
+
+            async def tts_worker():
+                assert tts_queue is not None
+                while True:
+                    text = await tts_queue.get()
+                    if text is None:
+                        break
+                    if self._should_interrupt:
+                        continue
+                    await synthesize_and_emit(text)
+
+            if overlap_tts:
+                tts_queue = asyncio.Queue()
+                tts_worker_task = asyncio.create_task(tts_worker())
+
             try:
                 async for sentence in self.llm.generate_response_stream(
                     user_text,
-                    history=self._conversation_history[-10:],  # Keep last 10 messages
+                    history=self._conversation_history[-history_window:],
                 ):
                     # Check timeout manually for async generators
                     if time.time() - llm_start > settings.pipeline.llm_timeout_s:
                         logger.error("LLM stream timeout")
                         llm_timeout_reached = True
                         break
-                    
+
                     if self._should_interrupt:
                         debug_log("Pipeline interrupted")
                         break
+
+                    # Clean sentence - remove markdown bullets and normalize
+                    from ..utils.text_utils import normalize_for_tts
                     
-                    # Clean sentence - remove markdown bullets
                     sentence = sentence.strip()
                     if sentence.startswith('*'):
                         sentence = sentence.lstrip('* ').strip()
                     if sentence.startswith('-'):
                         sentence = sentence.lstrip('- ').strip()
                     
+                    # Normalize for TTS
+                    sentence = normalize_for_tts(sentence)
+
                     if not sentence:
                         continue
 
                     sentence_count += 1
+                    partial_response_count += 1
                     full_response += sentence + " "
 
                     # Emit text response immediately
                     await self._emit("response", {"text": sentence, "is_final": False})
-                    
+
                     # Buffer short sentences for TTS
                     sentence_buffer = (sentence_buffer + " " + sentence).strip() if sentence_buffer else sentence
-                    
+
                     # Only synthesize when buffer is long enough
-                    if len(sentence_buffer) < MIN_TTS_LENGTH:
+                    if len(sentence_buffer) < min_tts_length:
                         continue  # Wait for more text
 
-                    # Synthesize TTS with timeout
-                    try:
-                        audio_bytes = await asyncio.wait_for(
-                            self.tts.synthesize(sentence_buffer),
-                            timeout=settings.pipeline.tts_timeout_s
-                        )
+                    # Dispatch TTS synthesis (overlapped when enabled)
+                    if overlap_tts and tts_queue is not None:
+                        await tts_queue.put(sentence_buffer)
+                    else:
+                        await synthesize_and_emit(sentence_buffer)
 
-                        if audio_bytes:
-                            # Track duration
-                            tts_duration_ms += self.tts.get_audio_duration_ms(audio_bytes)
+                    sentence_buffer = ""
 
-                            # Emit audio
-                            await self._emit("audio", audio_bytes)
-                        
-                        # Clear buffer after successful synthesis
-                        sentence_buffer = ""
-                    except asyncio.TimeoutError:
-                        logger.warning(f"TTS timeout for sentence {sentence_count}")
-                        sentence_buffer = ""  # Clear buffer to avoid repeating
-                        continue  # Skip this sentence
-                    except Exception as e:
-                        logger.error(f"TTS error: {e}")
-                        sentence_buffer = ""
-                        continue
-                
                 # Synthesize any remaining buffer
                 if sentence_buffer and len(sentence_buffer) >= 5:
-                    try:
-                        audio_bytes = await asyncio.wait_for(
-                            self.tts.synthesize(sentence_buffer),
-                            timeout=settings.pipeline.tts_timeout_s
-                        )
-                        if audio_bytes:
-                            tts_duration_ms += self.tts.get_audio_duration_ms(audio_bytes)
-                            await self._emit("audio", audio_bytes)
-                    except Exception as e:
-                        logger.warning(f"TTS error for remaining buffer: {e}")
-                
+                    if overlap_tts and tts_queue is not None:
+                        await tts_queue.put(sentence_buffer)
+                    else:
+                        await synthesize_and_emit(sentence_buffer)
+
+                if overlap_tts and tts_queue is not None:
+                    await tts_queue.put(None)
+                    if tts_worker_task:
+                        await tts_worker_task
+
+                llm_stream_total_ms = (time.perf_counter() - stream_start) * 1000
+
                 # Handle timeout case
                 if llm_timeout_reached and not full_response:
                     full_response = "Xin lỗi, tôi đang gặp sự cố khi xử lý câu hỏi của bạn."
-                    
+
             except Exception as e:
                 logger.error(f"LLM stream error: {e}")
                 if not full_response:
@@ -371,11 +409,45 @@ class PipelineOrchestrator:
                     Message(role="assistant", content=full_response.strip())
                 )
                 # Send final response
-                await self._emit("response", {"text": full_response.strip(), "is_final": True})
+                # Avoid duplicating full text on UI when partial chunks were already streamed.
+                final_text = "" if partial_response_count > 0 else full_response.strip()
+                await self._emit(
+                    "response",
+                    {
+                        "text": final_text,
+                        "full_text": full_response.strip(),
+                        "is_final": True,
+                    },
+                )
 
             # Reduced wait time for better responsiveness
-            playback_wait = min(tts_duration_ms / 1000, 2.0) + 0.3  # Max 2s + 300ms buffer
-            await asyncio.sleep(playback_wait)
+            playback_wait = min(tts_duration_ms / 1000, settings.pipeline.max_playback_wait_s)
+            if playback_wait > 0:
+                await asyncio.sleep(playback_wait)
+
+            logger.info(
+                "Pipeline breakdown: "
+                f"llm_stream_total={llm_stream_total_ms:.0f}ms, "
+                f"tts_synth_total={tts_synth_wall_ms:.0f}ms, "
+                f"tts_chunks={tts_chunk_count}, "
+                f"tts_audio_total={tts_duration_ms:.0f}ms, "
+                f"playback_wait={playback_wait * 1000:.0f}ms"
+            )
+
+            await self._emit(
+                "control",
+                {
+                    "action": "latency",
+                    "summary": latency.get_summary(),
+                    "breakdown": {
+                        "llm_stream_total_ms": round(llm_stream_total_ms, 1),
+                        "tts_synth_total_ms": round(tts_synth_wall_ms, 1),
+                        "tts_chunks": tts_chunk_count,
+                        "tts_audio_total_ms": round(tts_duration_ms, 1),
+                        "playback_wait_ms": round(playback_wait * 1000, 1),
+                    },
+                },
+            )
 
         except Exception as e:
             log_error("pipeline", e)
@@ -436,12 +508,27 @@ class PipelineOrchestrator:
         """
         self._state = PipelineState.PROCESSING
 
+        # Add user message to history
+        self._conversation_history.append(Message(role="user", content=text))
+
+        full_response = ""
         async for sentence in self.llm.generate_response_stream(text):
-            yield PipelineEvent(type="response", data={"text": sentence})
+            yield PipelineEvent(type="response", data={"text": sentence, "is_final": False})
+            full_response += sentence + " "
 
             audio = await self.tts.synthesize(sentence)
             if audio:
                 yield PipelineEvent(type="audio", data=audio)
+
+        # Add assistant response to history and emit final event
+        if full_response.strip():
+            self._conversation_history.append(
+                Message(role="assistant", content=full_response.strip())
+            )
+            yield PipelineEvent(
+                type="response",
+                data={"text": "", "full_text": full_response.strip(), "is_final": True}
+            )
 
         self._state = PipelineState.IDLE
 

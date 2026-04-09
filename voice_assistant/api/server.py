@@ -5,9 +5,11 @@ With session management and conversation state tracking.
 
 import asyncio
 import json
+import time
 from pathlib import Path
 from typing import Optional, Dict
 
+import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -16,6 +18,10 @@ from fastapi.responses import FileResponse
 from ..config import settings
 from ..utils.logging import logger, debug_log
 from ..core.pipeline import PipelineOrchestrator, PipelineEvent
+from ..core.asr import get_asr_service
+from ..core.llm import get_llm_service
+from ..core.tts import get_tts_service
+from ..core.vad import get_vad_service
 from ..core.session import (
     SessionManager,
     Session,
@@ -47,6 +53,71 @@ if STATIC_DIR.exists():
 session_manager: SessionManager = None
 
 
+async def _warmup_models():
+    """
+    Run warmup inference on all models to avoid first-request delay.
+    
+    This preloads weights into memory and runs a small inference
+    to trigger any JIT compilation or lazy initialization.
+    """
+    if not settings.server.warmup:
+        logger.info("Model warmup disabled")
+        return
+
+    start = time.time()
+    logger.info("Starting model warmup...")
+
+    # 1. VAD warmup
+    try:
+        vad = get_vad_service()
+        # Run on 100ms of silence as PCM S16LE (1600 samples * 2 bytes)
+        dummy_pcm = np.zeros(1600, dtype=np.int16).tobytes()
+        vad.process_chunk(dummy_pcm)
+        vad.reset()
+        logger.info("✓ VAD warmed up")
+    except Exception as e:
+        logger.warning(f"VAD warmup failed: {e}")
+
+    # 2. ASR warmup
+    try:
+        asr = get_asr_service()
+        asr._ensure_loaded()
+        # Run tiny inference if model supports it
+        if asr._model and hasattr(asr._model, 'transcribe_bytes'):
+            dummy_pcm = np.zeros(16000, dtype=np.int16).tobytes()  # 1s silence
+            asr._model.transcribe_bytes(dummy_pcm)
+        elif asr._model and hasattr(asr._model, 'transcribe_array'):
+            dummy_audio = np.zeros(16000, dtype=np.float32)
+            asr._model.transcribe_array(dummy_audio, 16000)
+        logger.info("✓ ASR warmed up")
+    except Exception as e:
+        logger.warning(f"ASR warmup failed: {e}")
+
+    # 3. LLM warmup (just init client, no actual inference to save API calls)
+    try:
+        llm = get_llm_service()
+        llm._ensure_client()
+        logger.info("✓ LLM client initialized")
+    except Exception as e:
+        logger.warning(f"LLM warmup failed: {e}")
+
+    # 4. TTS warmup
+    try:
+        tts = get_tts_service()
+        provider = tts._get_provider()
+        # Run small synthesis to fully initialize
+        audio = await tts.synthesize("Xin chào.")
+        if audio:
+            logger.info(f"✓ TTS warmed up ({provider.name})")
+        else:
+            logger.info(f"✓ TTS provider loaded ({provider.name})")
+    except Exception as e:
+        logger.warning(f"TTS warmup failed: {e}")
+
+    elapsed = time.time() - start
+    logger.info(f"Model warmup complete in {elapsed:.1f}s")
+
+
 @app.on_event("startup")
 async def startup():
     """Initialize on server startup."""
@@ -54,6 +125,9 @@ async def startup():
     session_manager = get_session_manager()
     await session_manager.start_cleanup_loop()
     logger.info("Session manager initialized")
+    
+    # Run model warmup
+    await _warmup_models()
 
 
 @app.on_event("shutdown")
@@ -71,6 +145,7 @@ class ConnectionManager:
     def __init__(self):
         self.connections: Dict[str, WebSocket] = {}
         self.orchestrators: Dict[str, PipelineOrchestrator] = {}
+        self.audio_formats: Dict[str, str] = {}
 
     async def connect(
         self,
@@ -80,6 +155,7 @@ class ConnectionManager:
     ) -> PipelineOrchestrator:
         await websocket.accept()
         self.connections[client_id] = websocket
+        self.audio_formats[client_id] = "base64"
 
         # Create orchestrator for this connection
         orchestrator = PipelineOrchestrator()
@@ -110,7 +186,17 @@ class ConnectionManager:
         """Handle pipeline event and update session."""
         try:
             if event.type == "audio":
-                await self.send_bytes(client_id, event.data)
+                audio_format = self.audio_formats.get(client_id, "base64")
+                if audio_format == "binary":
+                    await self.send_bytes(client_id, event.data)
+                else:
+                    # Send audio as JSON with base64 encoding for compatibility
+                    import base64
+                    audio_b64 = base64.b64encode(event.data).decode('utf-8')
+                    await self.send_json(client_id, {
+                        "type": "audio",
+                        "audio": audio_b64,
+                    })
 
             elif event.type == "transcript":
                 data = event.data
@@ -124,8 +210,18 @@ class ConnectionManager:
 
             elif event.type == "response":
                 # Update session with assistant message
-                if event.data.get("text"):
-                    session.add_message("assistant", event.data["text"])
+                response_text = event.data.get("text")
+                full_text = event.data.get("full_text")
+                is_final = event.data.get("is_final", False)
+
+                if is_final and full_text:
+                    session.add_message("assistant", full_text)
+                elif is_final and response_text:
+                    session.add_message("assistant", response_text)
+                elif response_text and not is_final:
+                    # Keep chunk messages transient for UI streaming only.
+                    pass
+
                 await self.send_json(client_id, {
                     "type": "response",
                     **event.data,
@@ -155,6 +251,8 @@ class ConnectionManager:
             del self.connections[client_id]
         if client_id in self.orchestrators:
             del self.orchestrators[client_id]
+        if client_id in self.audio_formats:
+            del self.audio_formats[client_id]
         logger.info(f"Client disconnected: {client_id}")
 
     async def send_bytes(self, client_id: str, data: bytes):
@@ -164,6 +262,10 @@ class ConnectionManager:
     async def send_json(self, client_id: str, data: dict):
         if client_id in self.connections:
             await self.connections[client_id].send_text(json.dumps(data, ensure_ascii=False))
+
+    def set_audio_format(self, client_id: str, audio_format: str):
+        if audio_format in {"base64", "binary"}:
+            self.audio_formats[client_id] = audio_format
 
 
 manager = ConnectionManager()
@@ -317,9 +419,14 @@ async def websocket_endpoint(
 
                     if msg_type == "text":
                         # Process text input directly
+                        user_text = message.get("text", "").strip()
+                        if user_text:
+                            # Add user message to session history
+                            session.add_message("user", user_text)
+                        
                         session.set_state(ConversationState.PROCESSING)
-                        async for event in orchestrator.process_text(message["text"]):
-                            pass  # Events handled by on_event callback
+                        async for event in orchestrator.process_text(user_text):
+                            await manager._handle_event(client_id, session, event)
                         session.set_state(ConversationState.IDLE)
 
                     elif msg_type == "reset":
@@ -346,6 +453,11 @@ async def websocket_endpoint(
                             "state": session.state.name,
                             "stats": session.stats.to_dict(),
                         })
+                    
+                    elif msg_type == "client_config":
+                        audio_format = message.get("audio_format")
+                        if audio_format:
+                            manager.set_audio_format(client_id, audio_format)
 
                 except json.JSONDecodeError:
                     debug_log("Invalid JSON received")
