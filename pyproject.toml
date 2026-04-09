@@ -50,6 +50,9 @@ dependencies = [
     "websockets>=11.0",
     "python-dotenv>=1.0.0",
     "qwen-tts>=0.1.1",
+    "sherpa-onnx>=1.12.36",
+    "edge-tts>=7.2.8",
+    "vieneu>=2.4.3",
 ]
 
 [project.optional-dependencies]
@@ -113,8 +116,8 @@ ignore_missing_imports = true
 asyncio_mode = "auto"
 testpaths = ["tests"]
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "pytest>=9.0.0",
     "pytest-asyncio>=1.0.0",
 ]

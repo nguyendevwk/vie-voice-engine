@@ -1,6 +1,5 @@
 """
 CLI interface for Voice Assistant.
-Interactive voice assistant with real-time streaming.
 """
 
 import argparse
@@ -10,7 +9,7 @@ from typing import Optional
 
 from ..config import settings
 from ..utils.logging import logger, setup_logging
-from ..core.streaming import StreamingPipeline, StreamState
+from ..core.pipeline import PipelineOrchestrator, PipelineEvent
 
 
 def parse_args():
@@ -20,10 +19,9 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    python -m voice_assistant.cli.main
-    python -m voice_assistant.cli.main --text-only
-    python -m voice_assistant.cli.main --debug
-    python -m voice_assistant.cli.main --streaming
+    uv run python -m voice_assistant.cli.main
+    uv run python -m voice_assistant.cli.main --text-only
+    uv run python -m voice_assistant.cli.main --no-tts
         """,
     )
 
@@ -33,107 +31,70 @@ Examples:
         help="Text input mode (no microphone)",
     )
     parser.add_argument(
-        "--streaming",
+        "--no-tts",
         action="store_true",
-        default=True,
-        help="Use streaming pipeline (default)",
+        help="Disable TTS output",
     )
     parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable debug logging",
     )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="auto",
-        help="Device for models (cpu/cuda/cuda:0)",
-    )
-    parser.add_argument(
-        "--no-tts",
-        action="store_true",
-        help="Disable TTS output",
-    )
 
     return parser.parse_args()
 
 
 class CLIAssistant:
-    """CLI-based voice assistant with real-time streaming."""
+    """CLI-based voice assistant."""
 
     def __init__(self, text_only: bool = False, no_tts: bool = False):
         self.text_only = text_only
         self.no_tts = no_tts
-        self.pipeline: Optional[StreamingPipeline] = None
-        self._audio_player = None
-        self._running = False
+        self.orchestrator: Optional[PipelineOrchestrator] = None
         self._current_response = ""
 
     async def setup(self):
-        """Initialize components."""
-        logger.info("Initializing Voice Assistant (Streaming Mode)...")
-
-        # Create streaming pipeline with callbacks
-        self.pipeline = StreamingPipeline(
-            on_interim_transcript=self._on_interim,
-            on_final_transcript=self._on_final_transcript,
-            on_llm_token=self._on_llm_token,
-            on_llm_sentence=self._on_llm_sentence,
-            on_audio_chunk=self._on_audio_chunk,
-            on_state_change=self._on_state_change,
-            enable_tts=not self.no_tts,
+        """Initialize pipeline."""
+        logger.info("Initializing Voice Assistant...")
+        
+        self.orchestrator = PipelineOrchestrator(
+            on_event=self._on_event
         )
-
-        if not self.no_tts:
-            try:
-                import sounddevice as sd
-                self._audio_player = AudioPlayer()
-                logger.info("Audio output initialized")
-            except ImportError:
-                logger.warning("sounddevice not installed, audio playback disabled")
-                self.no_tts = True
-
+        
         logger.info("Voice Assistant ready!")
 
-    # Streaming callbacks
-    async def _on_interim(self, text: str):
-        """Handle interim transcript."""
-        print(f"\r🎤 {text}...", end="", flush=True)
-
-    async def _on_final_transcript(self, text: str):
-        """Handle final transcript."""
-        print(f"\n🎤 You: {text}")
-        self._current_response = ""
-        print("🤖 ", end="", flush=True)
-
-    async def _on_llm_token(self, token: str):
-        """Handle LLM token (for display)."""
-        if settings.debug:
-            print(token, end="", flush=True)
-
-    async def _on_llm_sentence(self, sentence: str):
-        """Handle complete sentence."""
-        self._current_response += sentence + " "
-        print(sentence, end=" ", flush=True)
-
-    async def _on_audio_chunk(self, audio: bytes):
-        """Handle TTS audio chunk."""
-        if self._audio_player and not self.no_tts:
-            await self._audio_player.play(audio)
-
-    async def _on_state_change(self, state: StreamState):
-        """Handle state change."""
-        if state == StreamState.IDLE and self._current_response:
-            print()  # Newline after response
-        elif state == StreamState.INTERRUPTED:
-            print("\n⚡ [Interrupted]")
+    async def _on_event(self, event: PipelineEvent):
+        """Handle pipeline events."""
+        if event.type == "transcript":
+            text = event.data.get("text", "")
+            is_final = event.data.get("is_final", False)
+            
+            if is_final:
+                print(f"\n🎤 You: {text}")
+                self._current_response = ""
+                print("🤖 ", end="", flush=True)
+            else:
+                print(f"\r🎤 {text}...", end="", flush=True)
+        
+        elif event.type == "response":
+            text = event.data.get("text", "")
+            is_final = event.data.get("is_final", False)
+            
+            self._current_response += text + " "
+            print(text, end=" " if not is_final else "\n", flush=True)
+        
+        elif event.type == "audio":
+            # Play audio if needed
+            if not self.no_tts:
+                # Audio playback would go here
+                pass
 
     async def run_text_mode(self):
         """Run in text input mode."""
         print("\n" + "="*50)
         print("🇻🇳 Vietnamese Voice Assistant - Text Mode")
         print("="*50)
-        print("Nhập câu hỏi của bạn (hoặc 'exit' để thoát)")
+        print("Type your question (or 'exit' to quit)")
         print()
 
         while True:
@@ -148,152 +109,119 @@ class CLIAssistant:
                     break
 
                 print("Bot: ", end="", flush=True)
-
-                async for sentence, audio in self.pipeline.process_text(user_input):
-                    print(sentence, end=" ", flush=True)
-                    if self._audio_player and audio:
-                        await self._audio_player.play(audio)
-
-                print()
+                
+                # Process text through pipeline
+                async for event in self.orchestrator.process_text(user_input):
+                    # Events are handled by callback
+                    pass
+                
+                print()  # Newline after response
 
             except KeyboardInterrupt:
-                print("\nGoodbye! 👋")
+                print("\n\nGoodbye! 👋")
                 break
-            except EOFError:
-                break
+            except Exception as e:
+                logger.error(f"Error: {e}")
+                print(f"\nError: {e}")
 
     async def run_voice_mode(self):
-        """Run in voice input mode with real-time streaming."""
+        """Run in voice input mode."""
+        print("\n" + "="*50)
+        print("🇻🇳 Vietnamese Voice Assistant - Voice Mode")
+        print("="*50)
+        print("Speak into your microphone (Ctrl+C to quit)")
+        print()
+
         try:
             import sounddevice as sd
             import numpy as np
-        except ImportError:
-            logger.error("sounddevice not installed. Run: pip install sounddevice")
+        except (ImportError, OSError) as e:
+            print("\n❌ Error: Audio system not available")
+            print()
+            if "PortAudio" in str(e):
+                print("PortAudio library not found. Please install:")
+                print()
+                print("  Ubuntu/Debian:")
+                print("    sudo apt-get install portaudio19-dev")
+                print()
+                print("  Fedora/RHEL:")
+                print("    sudo dnf install portaudio-devel")
+                print()
+                print("  macOS:")
+                print("    brew install portaudio")
+                print()
+                print("Then reinstall sounddevice:")
+                print("    pip install --force-reinstall sounddevice")
+            else:
+                print("sounddevice not installed")
+                print("Install with: pip install sounddevice")
+            print()
+            print("💡 Try text mode instead: --text-only")
             return
 
-        print("\n" + "="*50)
-        print("🇻🇳 Vietnamese Voice Assistant - Streaming Mode")
-        print("="*50)
-        print("Nói vào microphone (Ctrl+C để thoát)")
-        print("Pipeline: Audio → VAD → ASR → LLM → TTS")
-        print()
+        # Audio stream parameters
+        sample_rate = settings.audio.sample_rate
+        chunk_size = settings.audio.chunk_samples
 
-        self._running = True
-        audio_queue = asyncio.Queue()
+        async def audio_callback(indata, frames, time_info, status):
+            """Process audio chunks."""
+            if status:
+                logger.warning(f"Audio status: {status}")
+            
+            # Convert to bytes
+            audio_bytes = indata.tobytes()
+            await self.orchestrator.handle_audio_chunk(audio_bytes)
 
-        # Audio processing task
-        async def process_audio():
-            while self._running:
-                try:
-                    audio_bytes = await asyncio.wait_for(
-                        audio_queue.get(), timeout=0.1
-                    )
-                    await self.pipeline.process_audio(audio_bytes)
-                except asyncio.TimeoutError:
-                    continue
-                except Exception as e:
-                    logger.error(f"Audio processing error: {e}")
-
-        # Start processing task
-        process_task = asyncio.create_task(process_audio())
-
+        # Start audio stream
         try:
-            # Audio input callback (runs in separate thread)
-            def audio_callback(indata, frames, time_info, status):
-                if status:
-                    logger.warning(f"Audio status: {status}")
-                if self._running:
-                    # Convert to PCM S16LE bytes
-                    audio_bytes = (indata[:, 0] * 32767).astype(np.int16).tobytes()
-                    try:
-                        audio_queue.put_nowait(audio_bytes)
-                    except asyncio.QueueFull:
-                        pass  # Drop if queue full
-
-            # Start audio stream
-            stream = sd.InputStream(
-                samplerate=settings.audio.sample_rate,
+            with sd.InputStream(
+                samplerate=sample_rate,
                 channels=1,
-                dtype="float32",
-                blocksize=settings.audio.chunk_samples,
-                callback=audio_callback,
-            )
-
-            stream.start()
-            logger.info("🎙️ Listening... (Ctrl+C to stop)")
-            print()
-
-            # Keep running
-            while self._running:
-                await asyncio.sleep(0.1)
-
+                dtype='int16',
+                blocksize=chunk_size,
+                callback=lambda *args: asyncio.create_task(audio_callback(*args))
+            ):
+                print("🎤 Listening...")
+                while True:
+                    await asyncio.sleep(0.1)
         except KeyboardInterrupt:
-            print("\n\nStopping...")
-        finally:
-            self._running = False
-            process_task.cancel()
-            try:
-                await process_task
-            except asyncio.CancelledError:
-                pass
-            if stream:
-                stream.stop()
-                stream.close()
+            print("\n\nGoodbye! 👋")
 
     async def run(self):
-        """Main entry point."""
+        """Run assistant."""
         await self.setup()
-
+        
         if self.text_only:
             await self.run_text_mode()
         else:
             await self.run_voice_mode()
 
 
-class AudioPlayer:
-    """Simple audio player using sounddevice."""
-
-    def __init__(self, sample_rate: int = 16000):
-        self.sample_rate = sample_rate
-        self._queue = asyncio.Queue()
-        self._playing = False
-
-    async def play(self, audio_bytes: bytes):
-        """Play audio bytes."""
-        import numpy as np
-        import sounddevice as sd
-
-        # Convert bytes to float32
-        audio = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-
-        # Play (non-blocking)
-        sd.play(audio, self.sample_rate)
-
-
 def main():
-    """CLI entry point."""
+    """Main entry point."""
     args = parse_args()
-
-    # Configure logging
+    
+    # Setup logging
+    log_level = "DEBUG" if args.debug else settings.log_level
+    setup_logging(level=log_level)
+    
+    # Update settings
     if args.debug:
         settings.debug = True
-        setup_logging("DEBUG")
-
-    # Configure device
-    if args.device != "auto":
-        settings.asr.device = args.device
-        settings.tts.device = args.device
-
+    
     # Run assistant
     assistant = CLIAssistant(
         text_only=args.text_only,
         no_tts=args.no_tts,
     )
-
+    
     try:
         asyncio.run(assistant.run())
     except KeyboardInterrupt:
-        pass
+        print("\n\nGoodbye! 👋")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}", exc_info=True)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
