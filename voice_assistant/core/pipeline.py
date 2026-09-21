@@ -459,10 +459,11 @@ class PipelineOrchestrator:
         except Exception as e:
             log_error("pipeline", e)
         finally:
-            # Unmute and reset
-            self._mic_muted = False
-            await self._emit("control", {"action": "mic_unmute"})
-            self._state = PipelineState.IDLE
+            # Only reset state if not interrupted (interrupt handler sets its own state)
+            if self._state != PipelineState.INTERRUPTED:
+                self._mic_muted = False
+                await self._emit("control", {"action": "mic_unmute"})
+                self._state = PipelineState.IDLE
 
             latency.end("pipeline_total")
             latency.log_summary()
@@ -474,9 +475,13 @@ class PipelineOrchestrator:
         self._should_interrupt = True
         self._state = PipelineState.INTERRUPTED
 
-        # Cancel pipeline
+        # Cancel pipeline and wait for its finally block to complete
         if self._pipeline_task:
             self._pipeline_task.cancel()
+            try:
+                await self._pipeline_task
+            except asyncio.CancelledError:
+                pass
 
         await self._emit("control", {"action": "interrupt"})
 
