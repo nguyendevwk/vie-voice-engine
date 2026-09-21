@@ -189,12 +189,17 @@ class PipelineOrchestrator:
 
         await self._audio_buffer.clear()
 
-        # Initialize streaming ASR
-        self._streaming_asr = StreamingASRService(
-            asr_service=self.asr,
-            on_transcript_update=self._on_transcript_update,
-        )
-        await self._streaming_asr.start_utterance()
+        # Initialize streaming ASR with error handling
+        try:
+            self._streaming_asr = StreamingASRService(
+                asr_service=self.asr,
+                on_transcript_update=self._on_transcript_update,
+            )
+            await self._streaming_asr.start_utterance()
+        except Exception as e:
+            logger.error(f"Failed to start ASR: {e}")
+            self._state = PipelineState.IDLE
+            self._streaming_asr = None
 
     async def _on_transcript_update(self, update: TranscriptUpdate):
         """Handle ASR transcript updates."""
