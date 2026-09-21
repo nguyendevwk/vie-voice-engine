@@ -103,6 +103,7 @@ class PipelineOrchestrator:
         self._audio_buffer = AudioBuffer()
         self._streaming_asr: Optional[StreamingASRService] = None
         self._conversation_history: List[Message] = []
+        self._max_history = settings.pipeline.llm_history_window * 2
 
         # Pipeline control
         self._pipeline_task: Optional[asyncio.Task] = None
@@ -266,6 +267,9 @@ class PipelineOrchestrator:
 
             # Add to history
             self._conversation_history.append(Message(role="user", content=user_text))
+            # Trim history to prevent unbounded growth
+            if len(self._conversation_history) > self._max_history:
+                self._conversation_history = self._conversation_history[-self._max_history:]
 
             # Stream LLM → TTS with timeout
             full_response = ""
@@ -408,6 +412,9 @@ class PipelineOrchestrator:
                 self._conversation_history.append(
                     Message(role="assistant", content=full_response.strip())
                 )
+                # Trim history to prevent unbounded growth
+                if len(self._conversation_history) > self._max_history:
+                    self._conversation_history = self._conversation_history[-self._max_history:]
                 # Send final response
                 # Avoid duplicating full text on UI when partial chunks were already streamed.
                 final_text = "" if partial_response_count > 0 else full_response.strip()
