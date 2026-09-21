@@ -5,7 +5,7 @@ Simplified from production for personal/demo use.
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 import os
 
 # Load .env file if exists
@@ -65,7 +65,7 @@ class ASRConfig:
 @dataclass
 class LLMConfig:
     """Language Model settings."""
-    provider: str = "groq"  # groq, openai, local
+    provider: str = "groq"  # groq, openai, ollama, anthropic, gemini
     model: str = "qwen/qwen3-32b"
     api_key: Optional[str] = field(default_factory=lambda: os.getenv("GROQ_API_KEY"))
     base_url: str = "https://api.groq.com/openai/v1"
@@ -73,6 +73,27 @@ class LLMConfig:
     temperature: float = 0.7  # Lower for more predictable TTS-friendly output
     use_extended: bool = True
     auto_register_task_handlers: bool = True
+
+    # Provider-specific configs
+    groq_api_key: Optional[str] = field(default_factory=lambda: os.getenv("GROQ_API_KEY"))
+    groq_model: str = "qwen/qwen3-32b"
+
+    openai_api_key: Optional[str] = field(default_factory=lambda: os.getenv("OPENAI_API_KEY"))
+    openai_model: str = "gpt-4o-mini"
+
+    anthropic_api_key: Optional[str] = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY"))
+    anthropic_model: str = "claude-sonnet-4-20250514"
+
+    gemini_api_key: Optional[str] = field(default_factory=lambda: os.getenv("GEMINI_API_KEY"))
+    gemini_model: str = "gemini-2.5-flash"
+
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model: str = "llama3"
+
+    # Fallback chain
+    fallback_providers: List[str] = field(default_factory=lambda: ["groq", "openai"])
+    provider_timeout_s: float = 10.0
+
     system_prompt: str = """Bạn là Nam, trợ lý ảo tiếng Việt.
 
 ## QUAN TRỌNG NHẤT
@@ -251,11 +272,39 @@ class Settings:
             )
         if os.getenv("LLM_SYSTEM_PROMPT"):
             settings.llm.system_prompt = os.getenv("LLM_SYSTEM_PROMPT")
+
+        # Legacy single API key
         if os.getenv("GROQ_API_KEY"):
             settings.llm.api_key = os.getenv("GROQ_API_KEY")
         if os.getenv("OPENAI_API_KEY") and settings.llm.provider == "openai":
             settings.llm.api_key = os.getenv("OPENAI_API_KEY")
             settings.llm.base_url = "https://api.openai.com/v1"
+
+        # Provider-specific configs
+        if os.getenv("GROQ_API_KEY"):
+            settings.llm.groq_api_key = os.getenv("GROQ_API_KEY")
+        if os.getenv("GROQ_MODEL"):
+            settings.llm.groq_model = os.getenv("GROQ_MODEL")
+        if os.getenv("OPENAI_API_KEY"):
+            settings.llm.openai_api_key = os.getenv("OPENAI_API_KEY")
+        if os.getenv("OPENAI_MODEL"):
+            settings.llm.openai_model = os.getenv("OPENAI_MODEL")
+        if os.getenv("ANTHROPIC_API_KEY"):
+            settings.llm.anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
+        if os.getenv("ANTHROPIC_MODEL"):
+            settings.llm.anthropic_model = os.getenv("ANTHROPIC_MODEL")
+        if os.getenv("GEMINI_API_KEY"):
+            settings.llm.gemini_api_key = os.getenv("GEMINI_API_KEY")
+        if os.getenv("GEMINI_MODEL"):
+            settings.llm.gemini_model = os.getenv("GEMINI_MODEL")
+        if os.getenv("OLLAMA_BASE_URL"):
+            settings.llm.ollama_base_url = os.getenv("OLLAMA_BASE_URL")
+        if os.getenv("OLLAMA_MODEL"):
+            settings.llm.ollama_model = os.getenv("OLLAMA_MODEL")
+        if os.getenv("LLM_FALLBACK_PROVIDERS"):
+            settings.llm.fallback_providers = os.getenv("LLM_FALLBACK_PROVIDERS").split(",")
+        if os.getenv("LLM_PROVIDER_TIMEOUT"):
+            settings.llm.provider_timeout_s = float(os.getenv("LLM_PROVIDER_TIMEOUT"))
 
         # Debug settings
         if os.getenv("DEBUG"):

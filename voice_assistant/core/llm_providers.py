@@ -337,6 +337,364 @@ class OllamaProvider(BaseLLMProvider):
         }
 
 
+class AnthropicProvider(BaseLLMProvider):
+    """
+    Anthropic Claude API provider.
+
+    Supported models:
+    - claude-sonnet-4-20250514 (recommended)
+    - claude-3-5-haiku-20241022 (faster)
+    - claude-3-opus-20240229 (highest quality)
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "claude-sonnet-4-20250514",
+        temperature: float = 0.7,
+        max_tokens: int = 1024,
+        **kwargs
+    ):
+        self.api_key = api_key
+        self.model = model
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.extra_kwargs = kwargs
+        self._client = None
+
+    def _ensure_client(self):
+        if self._client is None:
+            from anthropic import AsyncAnthropic
+            self._client = AsyncAnthropic(api_key=self.api_key)
+
+    async def generate(
+        self,
+        messages: List[Dict[str, str]],
+        **kwargs
+    ) -> LLMResponse:
+        self._ensure_client()
+
+        # Separate system message
+        system_text = ""
+        user_messages = []
+        for msg in messages:
+            if msg["role"] == "system":
+                system_text = msg["content"]
+            else:
+                user_messages.append(msg)
+
+        response = await self._client.messages.create(
+            model=kwargs.get("model", self.model),
+            max_tokens=kwargs.get("max_tokens", self.max_tokens),
+            temperature=kwargs.get("temperature", self.temperature),
+            system=system_text,
+            messages=user_messages,
+        )
+
+        content = ""
+        for block in response.content:
+            if block.type == "text":
+                content += block.text
+
+        return LLMResponse(
+            content=content,
+            finish_reason=response.stop_reason or "stop",
+            usage={
+                "prompt_tokens": response.usage.input_tokens,
+                "completion_tokens": response.usage.output_tokens,
+                "total_tokens": response.usage.input_tokens + response.usage.output_tokens,
+            } if response.usage else None,
+            raw=response
+        )
+
+    async def generate_stream(
+        self,
+        messages: List[Dict[str, str]],
+        **kwargs
+    ) -> AsyncIterator[str]:
+        self._ensure_client()
+
+        system_text = ""
+        user_messages = []
+        for msg in messages:
+            if msg["role"] == "system":
+                system_text = msg["content"]
+            else:
+                user_messages.append(msg)
+
+        async with self._client.messages.stream(
+            model=kwargs.get("model", self.model),
+            max_tokens=kwargs.get("max_tokens", self.max_tokens),
+            temperature=kwargs.get("temperature", self.temperature),
+            system=system_text,
+            messages=user_messages,
+        ) as stream:
+            async for text in stream.text_stream:
+                yield text
+
+    def supports_tools(self) -> bool:
+        return True
+
+    async def generate_with_tools(
+        self,
+        messages: List[Dict[str, str]],
+        tools: List[ToolDefinition],
+        **kwargs
+    ) -> LLMResponse:
+        self._ensure_client()
+
+        system_text = ""
+        user_messages = []
+        for msg in messages:
+            if msg["role"] == "system":
+                system_text = msg["content"]
+            else:
+                user_messages.append(msg)
+
+        # Convert tools to Anthropic format
+        anthropic_tools = []
+        for t in tools:
+            anthropic_tools.append({
+                "name": t.name,
+                "description": t.description,
+                "input_schema": t.parameters,
+            })
+
+        response = await self._client.messages.create(
+            model=kwargs.get("model", self.model),
+            max_tokens=kwargs.get("max_tokens", self.max_tokens),
+            temperature=kwargs.get("temperature", self.temperature),
+            system=system_text,
+            messages=user_messages,
+            tools=anthropic_tools,
+        )
+
+        content = ""
+        tool_calls = []
+        for block in response.content:
+            if block.type == "text":
+                content += block.text
+            elif block.type == "tool_use":
+                tool_calls.append({
+                    "id": block.id,
+                    "type": "function",
+                    "function": {
+                        "name": block.name,
+                        "arguments": json.dumps(block.input),
+                    }
+                })
+
+        return LLMResponse(
+            content=content,
+            finish_reason=response.stop_reason or "stop",
+            tool_calls=tool_calls if tool_calls else None,
+            usage={
+                "prompt_tokens": response.usage.input_tokens,
+                "completion_tokens": response.usage.output_tokens,
+                "total_tokens": response.usage.input_tokens + response.usage.output_tokens,
+            } if response.usage else None,
+            raw=response
+        )
+
+    def get_model_info(self) -> Dict[str, Any]:
+        return {
+            "name": self.model,
+            "provider": "anthropic",
+            "supports_tools": True,
+            "supports_vision": True,
+            "context_length": 200000,
+        }
+
+
+class GeminiProvider(BaseLLMProvider):
+    """
+    Google Gemini API provider.
+
+    Supported models:
+    - gemini-2.5-flash (recommended, fast)
+    - gemini-2.5-pro (highest quality)
+    - gemini-2.0-flash (previous gen, fast)
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "gemini-2.5-flash",
+        temperature: float = 0.7,
+        max_tokens: int = 1024,
+        **kwargs
+    ):
+        self.api_key = api_key
+        self.model = model
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.extra_kwargs = kwargs
+        self._client = None
+
+    def _ensure_client(self):
+        if self._client is None:
+            from google import genai
+            self._client = genai.Client(api_key=self.api_key)
+
+    def _convert_messages(
+        self, messages: List[Dict[str, str]]
+    ) -> tuple:
+        """Convert OpenAI-format messages to Gemini format."""
+        system_text = ""
+        contents = []
+
+        for msg in messages:
+            if msg["role"] == "system":
+                system_text = msg["content"]
+            elif msg["role"] == "user":
+                contents.append({"role": "user", "parts": [{"text": msg["content"]}]})
+            elif msg["role"] == "assistant":
+                contents.append({"role": "model", "parts": [{"text": msg["content"]}]})
+
+        return system_text, contents
+
+    async def generate(
+        self,
+        messages: List[Dict[str, str]],
+        **kwargs
+    ) -> LLMResponse:
+        self._ensure_client()
+
+        system_text, contents = self._convert_messages(messages)
+
+        from google.genai import types
+        response = self._client.models.generate_content(
+            model=kwargs.get("model", self.model),
+            contents=contents,
+            config=types.GenerateContentConfig(
+                max_output_tokens=kwargs.get("max_tokens", self.max_tokens),
+                temperature=kwargs.get("temperature", self.temperature),
+                system_instruction=system_text if system_text else None,
+            ),
+        )
+
+        content = response.text or ""
+        usage = None
+        if response.usage_metadata:
+            usage = {
+                "prompt_tokens": response.usage_metadata.prompt_token_count or 0,
+                "completion_tokens": response.usage_metadata.candidates_token_count or 0,
+                "total_tokens": (response.usage_metadata.prompt_token_count or 0)
+                + (response.usage_metadata.candidates_token_count or 0),
+            }
+
+        return LLMResponse(
+            content=content,
+            finish_reason="stop",
+            usage=usage,
+            raw=response,
+        )
+
+    async def generate_stream(
+        self,
+        messages: List[Dict[str, str]],
+        **kwargs
+    ) -> AsyncIterator[str]:
+        self._ensure_client()
+
+        system_text, contents = self._convert_messages(messages)
+
+        from google.genai import types
+        stream = self._client.models.generate_content_stream(
+            model=kwargs.get("model", self.model),
+            contents=contents,
+            config=types.GenerateContentConfig(
+                max_output_tokens=kwargs.get("max_tokens", self.max_tokens),
+                temperature=kwargs.get("temperature", self.temperature),
+                system_instruction=system_text if system_text else None,
+            ),
+        )
+
+        for chunk in stream:
+            if chunk.text:
+                yield chunk.text
+
+    def supports_tools(self) -> bool:
+        return True
+
+    async def generate_with_tools(
+        self,
+        messages: List[Dict[str, str]],
+        tools: List[ToolDefinition],
+        **kwargs
+    ) -> LLMResponse:
+        self._ensure_client()
+
+        system_text, contents = self._convert_messages(messages)
+
+        from google.genai import types
+        gemini_tools = []
+        for t in tools:
+            gemini_tools.append(
+                types.Tool(
+                    function_declarations=[
+                        types.FunctionDeclaration(
+                            name=t.name,
+                            description=t.description,
+                            parameters=t.parameters,
+                        )
+                    ]
+                )
+            )
+
+        response = self._client.models.generate_content(
+            model=kwargs.get("model", self.model),
+            contents=contents,
+            config=types.GenerateContentConfig(
+                max_output_tokens=kwargs.get("max_tokens", self.max_tokens),
+                temperature=kwargs.get("temperature", self.temperature),
+                system_instruction=system_text if system_text else None,
+                tools=gemini_tools if gemini_tools else None,
+            ),
+        )
+
+        content = response.text or ""
+        tool_calls = []
+
+        if response.candidates and response.candidates[0].content:
+            for part in response.candidates[0].content.parts:
+                if part.function_call:
+                    tool_calls.append({
+                        "id": part.function_call.name,
+                        "type": "function",
+                        "function": {
+                            "name": part.function_call.name,
+                            "arguments": json.dumps(dict(part.function_call.args)),
+                        }
+                    })
+
+        usage = None
+        if response.usage_metadata:
+            usage = {
+                "prompt_tokens": response.usage_metadata.prompt_token_count or 0,
+                "completion_tokens": response.usage_metadata.candidates_token_count or 0,
+                "total_tokens": (response.usage_metadata.prompt_token_count or 0)
+                + (response.usage_metadata.candidates_token_count or 0),
+            }
+
+        return LLMResponse(
+            content=content,
+            finish_reason="stop",
+            tool_calls=tool_calls if tool_calls else None,
+            usage=usage,
+            raw=response,
+        )
+
+    def get_model_info(self) -> Dict[str, Any]:
+        return {
+            "name": self.model,
+            "provider": "gemini",
+            "supports_tools": True,
+            "supports_vision": True,
+            "context_length": 1000000,
+        }
+
+
 class CustomAPIProvider(BaseLLMProvider):
     """
     Custom API provider for any endpoint.
@@ -474,40 +832,82 @@ def create_groq_provider(api_key: str = None, model: str = None) -> GroqProvider
 
 def create_openai_provider(api_key: str = None, model: str = None) -> OpenAIProvider:
     """Create OpenAI provider."""
-    import os
+    from ..config import settings
     return OpenAIProvider(
-        api_key=api_key or os.getenv("OPENAI_API_KEY"),
-        model=model or "gpt-4o-mini"
+        api_key=api_key or settings.llm.openai_api_key,
+        model=model or settings.llm.openai_model
     )
 
 
 def create_ollama_provider(model: str = "llama3", base_url: str = None) -> OllamaProvider:
     """Create Ollama provider for local inference."""
+    from ..config import settings
     return OllamaProvider(
-        model=model,
-        base_url=base_url or "http://localhost:11434"
+        model=model or settings.llm.ollama_model,
+        base_url=base_url or settings.llm.ollama_base_url
+    )
+
+
+def create_anthropic_provider(api_key: str = None, model: str = None) -> AnthropicProvider:
+    """Create Anthropic provider."""
+    from ..config import settings
+    return AnthropicProvider(
+        api_key=api_key or settings.llm.anthropic_api_key,
+        model=model or settings.llm.anthropic_model
+    )
+
+
+def create_gemini_provider(api_key: str = None, model: str = None) -> GeminiProvider:
+    """Create Gemini provider."""
+    from ..config import settings
+    return GeminiProvider(
+        api_key=api_key or settings.llm.gemini_api_key,
+        model=model or settings.llm.gemini_model
     )
 
 
 # Auto-register providers if API keys available
 def _auto_register_providers():
-    """Auto-register providers based on available API keys."""
+    """Auto-register providers based on available API keys and config."""
     from ..config import settings
     import os
 
     # Groq (primary)
-    if settings.llm.api_key:
-        register_provider("groq", create_groq_provider())
+    if settings.llm.groq_api_key:
+        register_provider("groq", GroqProvider(
+            api_key=settings.llm.groq_api_key,
+            model=settings.llm.groq_model
+        ))
 
-    # OpenAI (secondary)
-    if os.getenv("OPENAI_API_KEY"):
-        register_provider("openai", create_openai_provider())
+    # OpenAI
+    if settings.llm.openai_api_key:
+        register_provider("openai", OpenAIProvider(
+            api_key=settings.llm.openai_api_key,
+            model=settings.llm.openai_model
+        ))
 
-    # Ollama (local fallback)
+    # Anthropic
+    if settings.llm.anthropic_api_key:
+        register_provider("anthropic", AnthropicProvider(
+            api_key=settings.llm.anthropic_api_key,
+            model=settings.llm.anthropic_model
+        ))
+
+    # Gemini
+    if settings.llm.gemini_api_key:
+        register_provider("gemini", GeminiProvider(
+            api_key=settings.llm.gemini_api_key,
+            model=settings.llm.gemini_model
+        ))
+
+    # Ollama (auto-detect)
     try:
         import httpx
-        response = httpx.get("http://localhost:11434/api/tags", timeout=2.0)
+        response = httpx.get(f"{settings.llm.ollama_base_url}/api/tags", timeout=2.0)
         if response.status_code == 200:
-            register_provider("ollama", create_ollama_provider())
+            register_provider("ollama", OllamaProvider(
+                model=settings.llm.ollama_model,
+                base_url=settings.llm.ollama_base_url
+            ))
     except Exception:
         pass  # Ollama not available

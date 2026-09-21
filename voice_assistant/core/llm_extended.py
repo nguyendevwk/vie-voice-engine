@@ -19,7 +19,7 @@ from .llm_base import (
     BaseLLMProvider, BasePromptTemplate, BaseTaskHandler,
     get_registry, ToolDefinition
 )
-from .llm_providers import GroqProvider, create_groq_provider
+from .llm_providers import GroqProvider, create_groq_provider, _auto_register_providers
 from .llm_tasks import register_all_handlers
 
 from ..config import settings
@@ -69,22 +69,19 @@ class ExtendedLLMService:
         Initialize extended LLM service.
         
         Args:
-            provider: LLM provider (default: Groq)
+            provider: LLM provider (default: auto-select from config)
             template: Prompt template name
             auto_register_handlers: Register built-in handlers
         """
         self._registry = get_registry()
-        
-        # Set default provider
+
+        # Auto-register all available providers
+        _auto_register_providers()
+
         if provider:
             self._provider = provider
         else:
-            # Try to create Groq provider from settings
-            try:
-                self._provider = create_groq_provider()
-            except Exception as e:
-                logger.warning(f"Could not create Groq provider: {e}")
-                self._provider = None
+            self._provider = self._resolve_provider()
         
         # Set template
         self._template = self._registry.get_template(template)
@@ -97,6 +94,65 @@ class ExtendedLLMService:
         self.max_tokens = settings.llm.max_tokens
         self.temperature = settings.llm.temperature
         self.timeout = settings.pipeline.llm_timeout_s
+
+    def _resolve_provider(self) -> Optional[BaseLLMProvider]:
+        """
+        Resolve provider from config.
+
+        1. If settings.llm.provider matches a registered provider, use it.
+        2. If fallback_providers is set, create a FallbackProvider.
+        3. Otherwise, pick first available from registry.
+        """
+        primary_name = settings.llm.provider
+        primary = self._registry.get_provider(primary_name)
+
+        if primary:
+            debug_log(f"Resolved primary provider: {primary_name}")
+
+            # Wrap with fallback if configured
+            fallback_names = [
+                n for n in settings.llm.fallback_providers if n != primary_name
+            ]
+            fallback_providers = [
+                self._registry.get_provider(n)
+                for n in fallback_names
+                if self._registry.get_provider(n)
+            ]
+
+            if fallback_providers:
+                from .llm_fallback import FallbackProvider
+                debug_log(
+                    f"Creating fallback chain: {primary_name} -> "
+                    + " -> ".join(fallback_names[:len(fallback_providers)])
+                )
+                return FallbackProvider(
+                    providers=[primary] + fallback_providers,
+                    timeout_s=settings.llm.provider_timeout_s,
+                )
+
+            return primary
+
+        # Primary not registered — try fallback chain
+        fallback_names = [
+            n for n in settings.llm.fallback_providers
+            if self._registry.get_provider(n)
+        ]
+        if fallback_names:
+            from .llm_fallback import FallbackProvider
+            fallback_providers = [
+                self._registry.get_provider(n) for n in fallback_names
+            ]
+            debug_log(f"Fallback chain from registry: {' -> '.join(fallback_names)}")
+            return FallbackProvider(
+                providers=fallback_providers,
+                timeout_s=settings.llm.provider_timeout_s,
+            )
+
+        logger.warning(
+            f"No provider available. Configured: {primary_name}. "
+            f"Registered: {self._registry.list_providers()}"
+        )
+        return None
     
     def set_provider(self, name: str) -> bool:
         """
@@ -533,7 +589,7 @@ def get_extended_llm_service() -> ExtendedLLMService:
 
 def create_llm_for_task(
     task_type: str,
-    provider: str = "groq",
+    provider: str = None,
     **kwargs
 ) -> ExtendedLLMService:
     """
@@ -541,7 +597,7 @@ def create_llm_for_task(
     
     Args:
         task_type: Task type ("customer_support", "personal", "qa", etc.)
-        provider: Provider name
+        provider: Provider name (default: read from config)
         **kwargs: Template parameters
     
     Returns:
@@ -556,7 +612,7 @@ def create_llm_for_task(
     """
     llm = ExtendedLLMService()
     
-    # Set provider
+    # Set provider if specified
     if provider:
         llm.set_provider(provider)
     

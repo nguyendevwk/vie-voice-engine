@@ -15,6 +15,12 @@ All components are designed for async operation with streaming support.
 
 from .asr import ASRService, get_asr_service
 from .llm import LLMService, get_llm_service
+from .llm_fallback import FallbackProvider, create_fallback_provider
+from .llm_providers import (
+    GroqProvider, OpenAIProvider, OllamaProvider, AnthropicProvider, GeminiProvider,
+    create_groq_provider, create_openai_provider, create_ollama_provider,
+    create_anthropic_provider, create_gemini_provider,
+)
 from .tts import TTSService, get_tts_service
 from .vad import VADService, get_vad_service
 from .pipeline import PipelineOrchestrator, PipelineEvent, PipelineState
@@ -44,4 +50,17 @@ __all__ = [
     "AudioPreprocessor",
     "AudioNormalizer",
     "NoiseReducer",
+    # LLM Providers
+    "FallbackProvider",
+    "create_fallback_provider",
+    "GroqProvider",
+    "OpenAIProvider",
+    "OllamaProvider",
+    "AnthropicProvider",
+    "GeminiProvider",
+    "create_groq_provider",
+    "create_openai_provider",
+    "create_ollama_provider",
+    "create_anthropic_provider",
+    "create_gemini_provider",
 ]
