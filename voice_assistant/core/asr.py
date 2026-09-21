@@ -187,8 +187,9 @@ class StreamingASRService:
 
                 # Run interim ASR
                 try:
+                    # Use slice copy instead of list() for better performance
                     interim_text = await self.asr.transcribe_bytes_async(
-                        list(self._audio_buffer)
+                        self._audio_buffer[:]
                     )
 
                     # Emit if changed
