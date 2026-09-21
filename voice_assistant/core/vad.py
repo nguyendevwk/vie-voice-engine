@@ -118,13 +118,14 @@ class VADService:
             # Convert to tensor
             tensor = self._torch.from_numpy(chunk.astype(np.float32))
 
-            # Run VAD
+            # Run VAD (single inference per sub-chunk)
             speech_dict = self._iterator(tensor, return_seconds=True)
 
-            # Get probability for logging
-            with self._torch.no_grad():
-                prob = self._model(tensor.unsqueeze(0), settings.audio.sample_rate).item()
-                last_prob = prob
+            # Get probability only when debug logging enabled to avoid duplicate inference
+            if settings.debug:
+                with self._torch.no_grad():
+                    prob = self._model(tensor.unsqueeze(0), settings.audio.sample_rate).item()
+                    last_prob = prob
 
             # Parse events
             if speech_dict:
