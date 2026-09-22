@@ -6,6 +6,7 @@ With session management and conversation state tracking.
 import asyncio
 import json
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional, Dict
 
@@ -29,10 +30,37 @@ from ..core.session import (
     get_session_manager,
 )
 
+# Session manager (initialized in lifespan)
+session_manager: SessionManager = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage startup and shutdown lifecycle."""
+    global session_manager
+
+    # Startup
+    session_manager = get_session_manager()
+    await session_manager.start_cleanup_loop()
+    logger.info("Session manager initialized")
+
+    # Run model warmup
+    await _warmup_models()
+
+    yield
+
+    # Shutdown
+    if session_manager:
+        session_manager.stop_cleanup_loop()
+        if settings.session.persistence:
+            session_manager._save_sessions()
+
+
 app = FastAPI(
     title="Vietnamese Voice Assistant",
     description="Real-time voice assistant with ASR, LLM, and TTS streaming",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 # CORS for web clients
@@ -116,27 +144,6 @@ async def _warmup_models():
 
     elapsed = time.time() - start
     logger.info(f"Model warmup complete in {elapsed:.1f}s")
-
-
-@app.on_event("startup")
-async def startup():
-    """Initialize on server startup."""
-    global session_manager
-    session_manager = get_session_manager()
-    await session_manager.start_cleanup_loop()
-    logger.info("Session manager initialized")
-    
-    # Run model warmup
-    await _warmup_models()
-
-
-@app.on_event("shutdown")
-async def shutdown():
-    """Cleanup on server shutdown."""
-    if session_manager:
-        session_manager.stop_cleanup_loop()
-        if settings.session.persistence:
-            session_manager._save_sessions()
 
 
 class ConnectionManager:
