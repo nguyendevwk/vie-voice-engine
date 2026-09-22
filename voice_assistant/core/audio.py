@@ -76,8 +76,9 @@ class AudioNormalizer:
 
     def repair_clipping(self, audio: np.ndarray) -> np.ndarray:
         """
-        Attempt to repair clipped audio using cubic interpolation.
+        Attempt to repair clipped audio using soft-clipping.
 
+        Uses tanh-based soft-clipping to reduce harsh clipping artifacts.
         Note: This is a best-effort repair, severely clipped audio
         cannot be fully recovered.
         """
