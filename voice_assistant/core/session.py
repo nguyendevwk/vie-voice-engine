@@ -81,6 +81,9 @@ class Session:
     # Context for LLM (can store user preferences, etc.)
     context: Dict[str, Any] = field(default_factory=dict)
 
+    # Dirty flag for incremental persistence
+    _dirty: bool = field(default=False, repr=False)
+
     def add_message(self, role: str, content: str, **metadata) -> Message:
         """Add a message to conversation history."""
         message = Message(
@@ -90,6 +93,7 @@ class Session:
         )
         self.history.append(message)
         self.last_active = time.time()
+        self._dirty = True
 
         # Update stats
         self.stats.total_messages += 1
@@ -127,12 +131,14 @@ class Session:
             self.history = [m for m in self.history if m.role == "system"]
         else:
             self.history = []
+        self._dirty = True
 
     def set_state(self, state: ConversationState):
         """Update conversation state."""
         debug_log(f"Session {self.id[:8]} state: {self.state.name} → {state.name}")
         self.state = state
         self.last_active = time.time()
+        self._dirty = True
 
     def is_expired(self, timeout_seconds: int = None) -> bool:
         """Check if session has expired."""
@@ -321,17 +327,24 @@ class SessionManager:
             self._cleanup_task.cancel()
 
     def _save_sessions(self):
-        """Persist all sessions to disk."""
+        """Persist only dirty sessions to disk."""
         if not self.persistence_enabled:
             return
 
         self.storage_path.mkdir(parents=True, exist_ok=True)
 
         with self._lock:
+            saved = 0
             for session in self._sessions.values():
-                session_file = self.storage_path / f"{session.id}.json"
-                with open(session_file, "w", encoding="utf-8") as f:
-                    json.dump(session.to_dict(), f, ensure_ascii=False, indent=2)
+                if session._dirty:
+                    session_file = self.storage_path / f"{session.id}.json"
+                    with open(session_file, "w", encoding="utf-8") as f:
+                        json.dump(session.to_dict(), f, ensure_ascii=False, indent=2)
+                    session._dirty = False
+                    saved += 1
+
+            if saved > 0:
+                debug_log(f"Saved {saved} dirty sessions to disk")
 
     def _load_sessions(self):
         """Load persisted sessions from disk."""
