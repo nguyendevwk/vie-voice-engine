@@ -250,6 +250,11 @@ class ConnectionManager:
         if client_id in self.connections:
             del self.connections[client_id]
         if client_id in self.orchestrators:
+            orchestrator = self.orchestrators[client_id]
+            # Cancel any running pipeline task before cleanup
+            if orchestrator._pipeline_task and not orchestrator._pipeline_task.done():
+                orchestrator._pipeline_task.cancel()
+            orchestrator.reset()
             del self.orchestrators[client_id]
         if client_id in self.audio_formats:
             del self.audio_formats[client_id]
