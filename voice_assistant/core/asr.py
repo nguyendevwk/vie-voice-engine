@@ -185,12 +185,13 @@ class StreamingASRService:
                 if duration_ms < self.min_audio_for_interim_ms:
                     continue
 
-                # Run interim ASR
+                # Run interim ASR on recent audio only (avoids O(n²) re-transcription)
+                # Use last 3 seconds for interim to keep latency bounded
                 try:
-                    # Use slice copy instead of list() for better performance
-                    interim_text = await self.asr.transcribe_bytes_async(
-                        self._audio_buffer[:]
-                    )
+                    max_interim_chunks = int(3000 / settings.audio.chunk_duration_ms)
+                    recent_audio = self._audio_buffer[-max_interim_chunks:]
+
+                    interim_text = await self.asr.transcribe_bytes_async(recent_audio)
 
                     # Emit if changed
                     if interim_text and interim_text != self._last_interim_text:
