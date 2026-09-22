@@ -413,9 +413,3 @@ class AudioPreprocessor:
             return 60.0  # Very clean
 
         return 20 * np.log10(max_energy / min_energy)
-
-
-# Convenience instances
-preprocessor = AudioPreprocessor()
-normalizer = AudioNormalizer()
-noise_reducer = NoiseReducer()
