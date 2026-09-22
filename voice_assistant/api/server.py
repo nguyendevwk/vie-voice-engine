@@ -19,7 +19,7 @@ from ..config import settings
 from ..utils.logging import logger, debug_log
 from ..core.pipeline import PipelineOrchestrator, PipelineEvent
 from ..core.asr import get_asr_service
-from ..core.llm import get_llm_service
+from ..core.llm import LLMService, Message, get_llm_service
 from ..core.tts import get_tts_service
 from ..core.vad import get_vad_service
 from ..core.session import (
@@ -168,7 +168,7 @@ class ConnectionManager:
 
         # Restore conversation history to orchestrator
         orchestrator._conversation_history = [
-            type('Message', (), {'role': m.role, 'content': m.content})()
+            Message(role=m.role, content=m.content)
             for m in session.history
         ]
 
