@@ -331,6 +331,10 @@ class SessionManager:
             if saved > 0:
                 debug_log(f"Saved {saved} dirty sessions to disk")
 
+    def save_all(self):
+        """Public method to persist all dirty sessions to disk."""
+        self._save_sessions()
+
     def _load_sessions(self):
         """Load persisted sessions from disk."""
         if not self.storage_path.exists():

@@ -19,33 +19,33 @@ from fastapi.responses import FileResponse
 from ..config import settings
 from ..utils.logging import logger, debug_log
 from ..core.pipeline import PipelineOrchestrator, PipelineEvent
-from ..core.asr import get_asr_service
-from ..core.llm import LLMService, Message, get_llm_service
-from ..core.tts import get_tts_service
-from ..core.vad import get_vad_service
+from ..core.llm import Message, get_llm_service
 from ..core.session import (
     SessionManager,
     Session,
     ConversationState,
     get_session_manager,
 )
+from ..core.warmup import warmup_all
 
 # Session manager (initialized in lifespan)
 session_manager: SessionManager = None
+manager: ConnectionManager = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage startup and shutdown lifecycle."""
-    global session_manager
+    global session_manager, manager
 
     # Startup
     session_manager = get_session_manager()
+    manager = ConnectionManager()
     await session_manager.start_cleanup_loop()
     logger.info("Session manager initialized")
 
     # Run model warmup
-    await _warmup_models()
+    await warmup_all()
 
     yield
 
@@ -53,7 +53,7 @@ async def lifespan(app: FastAPI):
     if session_manager:
         session_manager.stop_cleanup_loop()
         if settings.session.persistence:
-            session_manager._save_sessions()
+            session_manager.save_all()
 
 
 app = FastAPI(
@@ -76,68 +76,6 @@ app.add_middleware(
 STATIC_DIR = Path(__file__).parent / "static"
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-
-
-async def _warmup_models():
-    """
-    Run warmup inference on all models to avoid first-request delay.
-    
-    This preloads weights into memory and runs a small inference
-    to trigger any JIT compilation or lazy initialization.
-    """
-    if not settings.server.warmup:
-        logger.info("Model warmup disabled")
-        return
-
-    start = time.time()
-    logger.info("Starting model warmup...")
-
-    # 1. VAD warmup
-    try:
-        vad = get_vad_service()
-        # Run on 100ms of silence as PCM S16LE (1600 samples * 2 bytes)
-        dummy_pcm = np.zeros(1600, dtype=np.int16).tobytes()
-        vad.process_chunk(dummy_pcm)
-        vad.reset()
-        logger.info("✓ VAD warmed up")
-    except Exception as e:
-        logger.warning(f"VAD warmup failed: {e}")
-
-    # 2. ASR warmup
-    try:
-        asr = get_asr_service()
-        asr._ensure_loaded()
-        # Run tiny inference to trigger JIT compilation
-        dummy_pcm = np.zeros(16000, dtype=np.int16).tobytes()
-        asr.transcribe_bytes([dummy_pcm])
-        logger.info("✓ ASR warmed up")
-    except Exception as e:
-        logger.warning(f"ASR warmup failed: {e}")
-
-    # 3. LLM warmup (just init client, no actual inference to save API calls)
-    try:
-        llm = get_llm_service()
-        if hasattr(llm, '_ensure_client'):
-            llm._ensure_client()
-        logger.info("✓ LLM client initialized")
-    except Exception as e:
-        logger.warning(f"LLM warmup failed: {e}")
-
-    # 4. TTS warmup
-    try:
-        tts = get_tts_service()
-        provider = tts._get_provider()
-        # Run small synthesis to fully initialize
-        audio = await tts.synthesize("Xin chào.")
-        if audio:
-            logger.info(f"✓ TTS warmed up ({provider.name})")
-        else:
-            logger.info(f"✓ TTS provider loaded ({provider.name})")
-    except Exception as e:
-        logger.warning(f"TTS warmup failed: {e}")
-
-    elapsed = time.time() - start
-    logger.info(f"Model warmup complete in {elapsed:.1f}s")
 
 
 class ConnectionManager:
@@ -278,9 +216,6 @@ class ConnectionManager:
     def set_audio_format(self, client_id: str, audio_format: str):
         if audio_format in {"base64", "binary"}:
             self.audio_formats[client_id] = audio_format
-
-
-manager = ConnectionManager()
 
 
 @app.get("/")
