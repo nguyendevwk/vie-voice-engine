@@ -12,7 +12,6 @@ import numpy as np
 
 from ..config import settings
 from ..utils.logging import debug_log, log_vad_event, logger
-from .audio import AudioPreprocessor
 
 
 @dataclass
@@ -43,7 +42,6 @@ class VADService:
 
         self._model = None
         self._iterator = None
-        self._preprocessor = AudioPreprocessor()
         self._is_speech_active = False
         self._speech_chunks = 0
         self._silence_chunks = 0
@@ -105,8 +103,9 @@ class VADService:
         start_time = time.perf_counter()
         self._ensure_loaded()
 
-        # Preprocess audio
-        audio = self._preprocessor.process(audio_data)
+        # Decode PCM16 to float32 only (no heavy preprocessing needed for VAD)
+        # Silero VAD works directly with raw float32 audio
+        audio = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
 
         # Process in 512-sample sub-chunks (Silero optimal)
         event_type = None
