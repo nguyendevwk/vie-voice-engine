@@ -16,6 +16,7 @@ import threading
 
 from ..config import settings
 from ..utils.logging import logger, debug_log
+from .llm_base import Message
 
 
 class ConversationState(Enum):
@@ -25,22 +26,6 @@ class ConversationState(Enum):
     PROCESSING = auto()     # Processing user input
     RESPONDING = auto()     # Bot is responding
     INTERRUPTED = auto()    # User interrupted
-
-
-@dataclass
-class Message:
-    """A single message in conversation."""
-    role: str               # user, assistant, system
-    content: str
-    timestamp: float = field(default_factory=time.time)
-    metadata: Dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> dict:
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, data: dict) -> "Message":
-        return cls(**data)
 
 
 @dataclass

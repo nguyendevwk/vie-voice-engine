@@ -35,7 +35,9 @@ class Message:
     name: Optional[str] = None  # For tool messages
     tool_calls: Optional[List[Dict]] = None  # For assistant tool calls
     tool_call_id: Optional[str] = None  # For tool response
-    
+    timestamp: Optional[float] = None  # For session persistence
+    metadata: Optional[Dict[str, Any]] = None  # For session metadata
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to API-compatible dict."""
         d = {"role": self.role, "content": self.content}
@@ -45,7 +47,16 @@ class Message:
             d["tool_calls"] = self.tool_calls
         if self.tool_call_id:
             d["tool_call_id"] = self.tool_call_id
+        if self.timestamp is not None:
+            d["timestamp"] = self.timestamp
+        if self.metadata:
+            d["metadata"] = self.metadata
         return d
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Message":
+        """Deserialize from dictionary."""
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
 
 @dataclass

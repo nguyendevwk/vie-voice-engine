@@ -5,19 +5,15 @@ Supports Groq, OpenAI, and compatible APIs.
 
 import asyncio
 from typing import AsyncIterator, List, Dict, Optional
-from dataclasses import dataclass
 
 from ..config import settings
 from ..utils.logging import debug_log, log_llm_token, latency, logger
 from ..utils.text_utils import normalize_llm_output, strip_thinking_blocks
 from .llm_extended import ExtendedLLMService
+from .llm_base import Message
 
-
-@dataclass
-class Message:
-    """Chat message."""
-    role: str  # system, user, assistant
-    content: str
+# Re-export Message for backward compatibility
+__all__ = ["LLMService", "ExtendedLLMAdapter", "Message", "get_llm_service"]
 
 
 class ExtendedLLMAdapter:
