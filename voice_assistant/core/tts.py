@@ -639,6 +639,12 @@ class TTSService:
         logger.info("Using Edge-TTS (fallback)")
         return self._provider
 
+    async def warmup(self):
+        """Warm up by loading provider and running small synthesis."""
+        provider = self._get_provider()
+        audio = await self.synthesize("Xin chào.")
+        return provider.name, bool(audio)
+
     async def synthesize(self, text: str, speaker: str = None) -> bytes:
         """
         Synthesize text to PCM audio bytes.

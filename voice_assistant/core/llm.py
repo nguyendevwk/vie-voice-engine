@@ -120,6 +120,10 @@ class LLMService:
 
         debug_log("LLM client initialized", model=self.model)
 
+    def warmup(self):
+        """Warm up by initializing API client (no inference to save API calls)."""
+        self._ensure_client()
+
     async def generate_response(self, prompt: str, history: List[Message] = None) -> str:
         """Generate complete response (non-streaming)."""
         self._ensure_client()

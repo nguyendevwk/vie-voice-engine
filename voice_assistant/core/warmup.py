@@ -42,9 +42,7 @@ async def warmup_all():
     try:
         from .asr import get_asr_service
         asr = get_asr_service()
-        asr._ensure_loaded()
-        dummy_pcm = np.zeros(16000, dtype=np.int16).tobytes()
-        asr.transcribe_bytes([dummy_pcm])
+        asr.warmup()
         logger.info("✓ ASR warmed up")
     except Exception as e:
         logger.warning(f"ASR warmup failed: {e}")
@@ -53,8 +51,7 @@ async def warmup_all():
     try:
         from .llm import get_llm_service
         llm = get_llm_service()
-        if hasattr(llm, '_ensure_client'):
-            llm._ensure_client()
+        llm.warmup()
         logger.info("✓ LLM client initialized")
     except Exception as e:
         logger.warning(f"LLM warmup failed: {e}")
@@ -63,12 +60,11 @@ async def warmup_all():
     try:
         from .tts import get_tts_service
         tts = get_tts_service()
-        provider = tts._get_provider()
-        audio = await tts.synthesize("Xin chào.")
-        if audio:
-            logger.info(f"✓ TTS warmed up ({provider.name})")
+        provider_name, has_audio = await tts.warmup()
+        if has_audio:
+            logger.info(f"✓ TTS warmed up ({provider_name})")
         else:
-            logger.info(f"✓ TTS provider loaded ({provider.name})")
+            logger.info(f"✓ TTS provider loaded ({provider_name})")
     except Exception as e:
         logger.warning(f"TTS warmup failed: {e}")
 

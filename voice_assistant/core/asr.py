@@ -87,6 +87,12 @@ class ASRService:
         log_asr_result(text, is_final=True)
         return text
 
+    def warmup(self):
+        """Warm up model by loading weights and running tiny inference."""
+        self._ensure_loaded()
+        dummy_pcm = np.zeros(16000, dtype=np.int16).tobytes()
+        self.transcribe_bytes([dummy_pcm])
+
     def transcribe_bytes(self, audio_chunks: List[bytes]) -> str:
         """
         Transcribe audio from PCM bytes.
