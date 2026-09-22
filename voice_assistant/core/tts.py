@@ -13,7 +13,6 @@ Usage:
 
 import asyncio
 import os
-import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional, Tuple, AsyncIterator, List, Dict, Any
@@ -37,42 +36,6 @@ def prepare_text_for_tts(text: str) -> str:
     """
     from ..utils.text_utils import normalize_for_tts
     return normalize_for_tts(text)
-
-
-def split_sentences(text: str, max_length: int = 150) -> List[str]:
-    """Split text into sentences for streaming TTS."""
-    if not text:
-        return []
-
-    # Split on sentence endings
-    parts = re.split(r'([.!?]+\s*)', text)
-
-    sentences = []
-    current = ""
-
-    for part in parts:
-        current += part
-        if re.search(r'[.!?]\s*$', current) and len(current.strip()) > 10:
-            sentences.append(current.strip())
-            current = ""
-
-    if current.strip():
-        sentences.append(current.strip())
-
-    # Merge short sentences
-    merged = []
-    buffer = ""
-    for s in sentences:
-        if len(buffer) + len(s) < 20:
-            buffer = (buffer + " " + s).strip() if buffer else s
-        else:
-            if buffer:
-                merged.append(buffer)
-            buffer = s
-    if buffer:
-        merged.append(buffer)
-
-    return merged
 
 
 # =============================================================================
@@ -687,10 +650,8 @@ class TTSService:
         Returns:
             PCM S16LE audio bytes at target sample rate
         """
-        from ..utils.text_utils import normalize_for_tts
-
-        # Normalize text before synthesis
-        text = normalize_for_tts(text)
+        # Text normalization is handled by each provider via prepare_text_for_tts()
+        # Do NOT normalize here to avoid double processing
         if not text:
             return b""
 
@@ -724,15 +685,6 @@ class TTSService:
         # Convert to PCM
         pcm = (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16)
         return pcm.tobytes()
-
-    async def synthesize_stream(self, text: str, speaker: str = None) -> AsyncIterator[bytes]:
-        """Stream TTS synthesis sentence by sentence."""
-        sentences = split_sentences(text)
-
-        for sentence in sentences:
-            audio = await self.synthesize(sentence, speaker)
-            if audio:
-                yield audio
 
     def _resample(self, audio: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
         """Resample audio."""
