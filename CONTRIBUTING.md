@@ -3,14 +3,14 @@
 ## Setup
 
 ```bash
-git clone https://github.com/nguyendevwk/end2end_asr_tts_vie.git
-cd end2end_asr_tts_vie
+git clone https://github.com/nguyendevwk/vie-voice-engine.git
+cd vie-voice-engine
 
-python -m venv .venv
-source .venv/bin/activate
+# Install with uv (recommended)
+uv sync
 
-pip install -r requirements.txt
-pip install -e .
+# Or with pip
+pip install -e ".[dev]"
 
 cp .env.example .env
 ```
@@ -33,17 +33,17 @@ python -m voice_assistant.api.server
 - Follow PEP 8
 - Use type hints
 - Google-style docstrings
-- Max line length: 100
+- Max line length: 88 (black default)
 
 ```python
 def process_audio(audio: np.ndarray, sample_rate: int = 16000) -> np.ndarray:
     """
     Process audio with normalization.
-    
+
     Args:
         audio: Input audio samples
         sample_rate: Sample rate in Hz
-        
+
     Returns:
         Processed audio samples
     """
@@ -53,7 +53,7 @@ def process_audio(audio: np.ndarray, sample_rate: int = 16000) -> np.ndarray:
 ## Commits
 
 ```
-type: short description
+type(scope): description
 
 - feat: new feature
 - fix: bug fix

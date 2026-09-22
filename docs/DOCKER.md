@@ -4,8 +4,8 @@
 
 ```bash
 # 1. Clone repository
-git clone https://github.com/nguyendevwk/end2end_asr_tts_vie.git
-cd end2end_asr_tts_vie
+git clone https://github.com/nguyendevwk/vie-voice-engine.git
+cd vie-voice-engine
 
 # 2. Configure environment
 cp .env.docker.example .env
@@ -14,10 +14,7 @@ nano .env  # Add your GROQ_API_KEY
 # 3. Build and run
 docker-compose up -d
 
-# 4. Check logs
-docker-compose logs -f
-
-# 5. Access
+# 4. Access
 # Open http://localhost:8000
 ```
 
@@ -36,13 +33,47 @@ ASR_USE_ONNX=true
 ASR_DEVICE=cpu
 
 # TTS Backend
-TTS_BACKEND=edge  # edge-tts works without GPU
+TTS_BACKEND=edge  # or vieneu_remote for better latency
 TTS_SPEECH_RATE=1.25
 
 # Server
 SERVER_PORT=8000
 DEBUG=false
 ```
+
+### TTS Backends
+
+| Backend | Command | GPU Required | Latency |
+|---------|---------|--------------|---------|
+| Edge-TTS | `TTS_BACKEND=edge` | No | 1-2s |
+| VieNeu Remote | `TTS_BACKEND=vieneu_remote` | No | 200-800ms |
+| VieNeu Local | `TTS_BACKEND=vieneu` | No | 100-500ms |
+| Qwen-TTS | `TTS_BACKEND=qwen` | Yes | 100-300ms |
+
+### VieNeu Remote Mode (Recommended for Docker)
+
+For optimal latency, use VieNeu-TTS Remote mode:
+
+```bash
+# 1. Start VieNeu server on host
+python -c "from vieneu.server import run_server; run_server(port=23333)"
+
+# 2. Configure .env
+TTS_BACKEND=vieneu_remote
+VIENEU_REMOTE_API_BASE=http://host.docker.internal:23333/v1
+VIENEU_REMOTE_MODEL_ID=pnnbao-ump/VieNeu-TTS
+
+# 3. Restart container
+docker-compose restart
+```
+
+**Network Configuration:**
+
+| Platform | API Base URL |
+|----------|--------------|
+| Docker Desktop (Mac/Windows) | `http://host.docker.internal:23333/v1` |
+| Linux | `http://172.17.0.1:23333/v1` |
+| Remote Server | `http://your-server:23333/v1` |
 
 ### Resource Limits
 
@@ -56,8 +87,6 @@ reservations:
   cpus: '2'
   memory: 4G
 ```
-
-Adjust based on your server specs.
 
 ## Management
 
@@ -99,7 +128,7 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    
+
     environment:
       - TTS_BACKEND=qwen
       - TTS_DEVICE=cuda:0
@@ -119,10 +148,10 @@ Models are cached in Docker volume:
 
 ```bash
 # View volume
-docker volume inspect end2end_asr_tts_vie_model-cache
+docker volume inspect vie-voice-engine_model-cache
 
 # Backup cache
-docker run --rm -v end2end_asr_tts_vie_model-cache:/data -v $(pwd):/backup alpine tar czf /backup/model-cache.tar.gz /data
+docker run --rm -v vie-voice-engine_model-cache:/data -v $(pwd):/backup alpine tar czf /backup/model-cache.tar.gz /data
 ```
 
 ### Session Storage
@@ -149,7 +178,7 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        
+
         # WebSocket timeout
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
@@ -165,88 +194,19 @@ Use Let's Encrypt with certbot:
 sudo certbot --nginx -d voice-assistant.example.com
 ```
 
-### Monitoring
-
-Add to `docker-compose.yml`:
-
-```yaml
-  prometheus:
-    image: prom/prometheus:latest
-    volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml
-    ports:
-      - "9090:9090"
-
-  grafana:
-    image: grafana/grafana:latest
-    ports:
-      - "3000:3000"
-    environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-```
-
 ## Troubleshooting
 
-### Container won't start
+| Problem | Solution |
+|---------|----------|
+| Container won't start | Check `docker-compose logs` for errors |
+| Health check failing | Verify `GROQ_API_KEY` is set in `.env` |
+| Out of memory | Reduce `memory` limit in `docker-compose.yml` |
+| Models not downloading | Check internet connection from container |
+| TTS falling back to Edge | Verify VieNeu server is running and accessible |
+| High TTS latency | Use same region for client and server |
 
-```bash
-# Check logs
-docker-compose logs voice-assistant
+## Resources
 
-# Common issues:
-# 1. Missing GROQ_API_KEY in .env
-# 2. Port 8000 already in use
-# 3. Insufficient memory
-```
-
-### Health check failing
-
-```bash
-# Check health status
-docker-compose ps
-
-# Manual health check
-curl http://localhost:8000/health
-```
-
-### Out of memory
-
-Reduce resource usage:
-
-```bash
-# Edit docker-compose.yml
-deploy:
-  resources:
-    limits:
-      memory: 4G  # Reduce from 8G
-```
-
-### Models not downloading
-
-```bash
-# Check internet connection from container
-docker-compose exec voice-assistant ping -c 3 google.com
-
-# Check disk space
-docker system df
-```
-
-## Building Custom Image
-
-```bash
-# Build with custom tag
-docker build -t voice-assistant:custom .
-
-# Push to registry
-docker tag voice-assistant:custom registry.example.com/voice-assistant:latest
-docker push registry.example.com/voice-assistant:latest
-```
-
-## Multi-stage Build Details
-
-The Dockerfile uses multi-stage build to minimize image size:
-
-- **Builder stage**: Compiles dependencies (~2GB)
-- **Runtime stage**: Only includes runtime deps (~1GB)
-
-Final image size: ~1.5GB (includes models cache)
+- [VieNeu-TTS Documentation](VIENEU_TTS.md)
+- [VieNeu Remote Mode](VIENEU_REMOTE_MODE.md)
+- [Voice Assistant README](../README.md)
