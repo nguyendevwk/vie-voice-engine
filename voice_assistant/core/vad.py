@@ -122,23 +122,17 @@ class VADService:
             # Run VAD (single inference per sub-chunk)
             speech_dict = self._iterator(tensor, return_seconds=True)
 
-            # Get probability only when debug logging enabled to avoid duplicate inference
-            if settings.debug:
-                with self._torch.no_grad():
-                    prob = self._model(tensor.unsqueeze(0), settings.audio.sample_rate).item()
-                    last_prob = prob
-
             # Parse events
             if speech_dict:
                 if "start" in speech_dict:
                     self._is_speech_active = True
                     self._speech_chunks = 0
                     event_type = "start"
-                    log_vad_event("SPEECH_START", speech_prob=prob)
+                    log_vad_event("SPEECH_START")
                 elif "end" in speech_dict:
                     self._is_speech_active = False
                     event_type = "end"
-                    log_vad_event("SPEECH_END", speech_prob=prob, chunks=self._speech_chunks)
+                    log_vad_event("SPEECH_END", chunks=self._speech_chunks)
 
         # Track consecutive speech/silence
         if self._is_speech_active:
@@ -153,7 +147,6 @@ class VADService:
         if settings.debug and (self._speech_chunks % 10 == 1 or self._silence_chunks % 50 == 1):
             log_vad_event(
                 f"{'SPEECH' if self._is_speech_active else 'SILENCE'}",
-                speech_prob=last_prob,
                 chunks=self._speech_chunks if self._is_speech_active else self._silence_chunks
             )
 
