@@ -281,7 +281,7 @@ class PipelineOrchestrator:
                 self._conversation_history = self._conversation_history[-self._max_history:]
 
             # Stream LLM → TTS with timeout
-            full_response = ""
+            response_parts: List[str] = []
             tts_duration_ms = 0.0
             sentence_count = 0
             partial_response_count = 0
@@ -371,7 +371,7 @@ class PipelineOrchestrator:
 
                     sentence_count += 1
                     partial_response_count += 1
-                    full_response += sentence + " "
+                    response_parts.append(sentence)
 
                     # Emit text response immediately
                     await self._emit("response", {"text": sentence, "is_final": False})
@@ -406,30 +406,31 @@ class PipelineOrchestrator:
                 llm_stream_total_ms = (time.perf_counter() - stream_start) * 1000
 
                 # Handle timeout case
-                if llm_timeout_reached and not full_response:
-                    full_response = "Xin lỗi, tôi đang gặp sự cố khi xử lý câu hỏi của bạn."
+                if llm_timeout_reached and not response_parts:
+                    response_parts.append("Xin lỗi, tôi đang gặp sự cố khi xử lý câu hỏi của bạn.")
 
             except Exception as e:
                 logger.error(f"LLM stream error: {e}")
-                if not full_response:
-                    full_response = "Xin lỗi, đã xảy ra lỗi khi xử lý câu hỏi của bạn."
+                if not response_parts:
+                    response_parts.append("Xin lỗi, đã xảy ra lỗi khi xử lý câu hỏi của bạn.")
 
             # Add assistant response to history
-            if full_response.strip():
+            full_response = " ".join(response_parts).strip()
+            if full_response:
                 self._conversation_history.append(
-                    Message(role="assistant", content=full_response.strip())
+                    Message(role="assistant", content=full_response)
                 )
                 # Trim history to prevent unbounded growth
                 if len(self._conversation_history) > self._max_history:
                     self._conversation_history = self._conversation_history[-self._max_history:]
                 # Send final response
                 # Avoid duplicating full text on UI when partial chunks were already streamed.
-                final_text = "" if partial_response_count > 0 else full_response.strip()
+                final_text = "" if partial_response_count > 0 else full_response
                 await self._emit(
                     "response",
                     {
                         "text": final_text,
-                        "full_text": full_response.strip(),
+                        "full_text": full_response,
                         "is_final": True,
                     },
                 )
