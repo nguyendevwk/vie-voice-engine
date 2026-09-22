@@ -11,6 +11,7 @@ from typing import AsyncIterator, Callable, List, Optional, Awaitable
 
 from ..config import settings
 from ..utils.logging import debug_log, latency, logger, log_error
+from ..utils.text_utils import normalize_for_tts
 from .vad import VADService, get_vad_service
 from .asr import ASRService, StreamingASRService, TranscriptUpdate, get_asr_service
 from .llm import LLMService, Message, get_llm_service
@@ -353,8 +354,6 @@ class PipelineOrchestrator:
                         break
 
                     # Clean sentence - remove markdown bullets and normalize
-                    from ..utils.text_utils import normalize_for_tts
-                    
                     sentence = sentence.strip()
                     if sentence.startswith('*'):
                         sentence = sentence.lstrip('* ').strip()
