@@ -4,6 +4,7 @@ Manages VAD → ASR → LLM → TTS flow with interrupt support.
 """
 
 import asyncio
+import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -565,11 +566,14 @@ class PipelineOrchestrator:
 
 # Lazy singleton
 _orchestrator: Optional[PipelineOrchestrator] = None
+_orchestrator_lock = threading.Lock()
 
 
 def get_orchestrator() -> PipelineOrchestrator:
-    """Get or create pipeline orchestrator singleton."""
+    """Get or create pipeline orchestrator singleton (thread-safe)."""
     global _orchestrator
     if _orchestrator is None:
-        _orchestrator = PipelineOrchestrator()
+        with _orchestrator_lock:
+            if _orchestrator is None:
+                _orchestrator = PipelineOrchestrator()
     return _orchestrator
