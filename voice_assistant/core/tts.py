@@ -524,18 +524,19 @@ class EdgeTTSProvider(BaseTTSProvider):
                 logger.error(f"Edge-TTS error: {e}")
                 return b""
 
-        # Run async
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                import nest_asyncio
-                nest_asyncio.apply()
-        except RuntimeError:
+        # Run async in a fresh event loop to avoid nest_asyncio global patching
+        import concurrent.futures
+
+        def _run_in_new_loop():
             loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+            try:
+                return loop.run_until_complete(_synthesize())
+            finally:
+                loop.close()
 
         with latency.track("tts_edge"):
-            audio_bytes = loop.run_until_complete(_synthesize())
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                audio_bytes = executor.submit(_run_in_new_loop).result()
 
         if not audio_bytes:
             return TTSResult(np.array([], dtype=np.float32), 16000)
