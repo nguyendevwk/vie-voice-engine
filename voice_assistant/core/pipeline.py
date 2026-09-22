@@ -536,6 +536,19 @@ class PipelineOrchestrator:
         self._conversation_history.clear()
         self._mic_muted = False
 
+    def cancel_pipeline(self):
+        """Cancel any running pipeline task."""
+        if self._pipeline_task and not self._pipeline_task.done():
+            self._pipeline_task.cancel()
+
+    def set_history(self, messages: List[Message]):
+        """Set conversation history from external source."""
+        self._conversation_history = list(messages)
+
+    def get_history(self) -> List[Message]:
+        """Get current conversation history."""
+        return list(self._conversation_history)
+
     async def process_text(self, text: str) -> AsyncIterator[PipelineEvent]:
         """
         Process text input directly (skip ASR).

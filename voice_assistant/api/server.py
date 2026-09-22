@@ -77,9 +77,6 @@ STATIC_DIR = Path(__file__).parent / "static"
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-# Session manager
-session_manager: SessionManager = None
-
 
 async def _warmup_models():
     """
@@ -110,13 +107,9 @@ async def _warmup_models():
     try:
         asr = get_asr_service()
         asr._ensure_loaded()
-        # Run tiny inference if model supports it
-        if asr._model and hasattr(asr._model, 'transcribe_bytes'):
-            dummy_pcm = np.zeros(16000, dtype=np.int16).tobytes()  # 1s silence
-            asr._model.transcribe_bytes(dummy_pcm)
-        elif asr._model and hasattr(asr._model, 'transcribe_array'):
-            dummy_audio = np.zeros(16000, dtype=np.float32)
-            asr._model.transcribe_array(dummy_audio, 16000)
+        # Run tiny inference to trigger JIT compilation
+        dummy_pcm = np.zeros(16000, dtype=np.int16).tobytes()
+        asr.transcribe_bytes([dummy_pcm])
         logger.info("✓ ASR warmed up")
     except Exception as e:
         logger.warning(f"ASR warmup failed: {e}")
@@ -124,7 +117,8 @@ async def _warmup_models():
     # 3. LLM warmup (just init client, no actual inference to save API calls)
     try:
         llm = get_llm_service()
-        llm._ensure_client()
+        if hasattr(llm, '_ensure_client'):
+            llm._ensure_client()
         logger.info("✓ LLM client initialized")
     except Exception as e:
         logger.warning(f"LLM warmup failed: {e}")
@@ -182,10 +176,10 @@ class ConnectionManager:
         orchestrator.on_event = on_event
 
         # Restore conversation history to orchestrator
-        orchestrator._conversation_history = [
+        orchestrator.set_history([
             Message(role=m.role, content=m.content)
             for m in session.history
-        ]
+        ])
 
         self.orchestrators[client_id] = orchestrator
 
@@ -266,9 +260,7 @@ class ConnectionManager:
             del self.connections[client_id]
         if client_id in self.orchestrators:
             orchestrator = self.orchestrators[client_id]
-            # Cancel any running pipeline task before cleanup
-            if orchestrator._pipeline_task and not orchestrator._pipeline_task.done():
-                orchestrator._pipeline_task.cancel()
+            orchestrator.cancel_pipeline()
             orchestrator.reset()
             del self.orchestrators[client_id]
         if client_id in self.audio_formats:
