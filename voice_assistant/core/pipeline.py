@@ -226,10 +226,13 @@ class PipelineOrchestrator:
             final_result = await self._streaming_asr.end_utterance()
 
             if final_result and final_result.text.strip():
-                # Run pipeline
+                # Run pipeline with total timeout
                 self._state = PipelineState.PROCESSING
                 self._pipeline_task = asyncio.create_task(
-                    self._run_pipeline(final_result.text)
+                    asyncio.wait_for(
+                        self._run_pipeline(final_result.text),
+                        timeout=settings.pipeline.pipeline_timeout_s,
+                    )
                 )
             else:
                 await self._reset_listening()
@@ -460,6 +463,8 @@ class PipelineOrchestrator:
                 },
             )
 
+        except asyncio.TimeoutError:
+            log_error("pipeline", TimeoutError(f"Pipeline timed out after {settings.pipeline.pipeline_timeout_s}s"))
         except Exception as e:
             log_error("pipeline", e)
         finally:
