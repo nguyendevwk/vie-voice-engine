@@ -463,6 +463,14 @@ class PipelineOrchestrator:
         except Exception as e:
             log_error("pipeline", e)
         finally:
+            # Clean up TTS worker task if it was created
+            if tts_worker_task and not tts_worker_task.done():
+                tts_worker_task.cancel()
+                try:
+                    await tts_worker_task
+                except asyncio.CancelledError:
+                    pass
+
             # Only reset state if not interrupted (interrupt handler sets its own state)
             if self._state != PipelineState.INTERRUPTED:
                 self._mic_muted = False
