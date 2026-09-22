@@ -1,475 +1,165 @@
 # API Documentation
 
-## PipelineOrchestrator
+## Quick Start
+
+```python
+from voice_assistant import PipelineOrchestrator
+
+pipeline = PipelineOrchestrator()
+async for event in pipeline.process_text("Xin chào"):
+    print(event.type, event.data)
+```
+
+## Public API
+
+### PipelineOrchestrator
 
 Main coordinator for the voice assistant pipeline.
 
-### Constructor
-
 ```python
-PipelineOrchestrator(
-    on_event: Optional[Callable[[PipelineEvent], Awaitable[None]]] = None
-)
-```
+from voice_assistant import PipelineOrchestrator
 
-**Parameters:**
-- `on_event`: Async callback for pipeline events
+pipeline = PipelineOrchestrator()
 
-**Example:**
-```python
-async def handle_event(event: PipelineEvent):
-    if event.type == "transcript":
-        print(f"User said: {event.data['text']}")
-    elif event.type == "response":
-        print(f"Assistant: {event.data['text']}")
-
-orchestrator = PipelineOrchestrator(on_event=handle_event)
-```
-
-### Methods
-
-#### `handle_audio_chunk(audio_bytes: bytes)`
-
-Process raw audio chunk.
-
-**Parameters:**
-- `audio_bytes`: PCM S16LE audio data (100ms recommended)
-
-**Returns:**
-- None (events sent via callback)
-
-**Example:**
-```python
-# 100ms chunk at 16kHz, mono, 16-bit
-audio_chunk = b'\x00' * 3200
-await orchestrator.handle_audio_chunk(audio_chunk)
-```
-
-#### `process_text(text: str) -> AsyncIterator[PipelineEvent]`
-
-Process text input directly (skip ASR).
-
-**Parameters:**
-- `text`: User query text
-
-**Yields:**
-- `PipelineEvent`: Events for response and audio
-
-**Example:**
-```python
-async for event in orchestrator.process_text("Xin chào"):
+# Process text input
+async for event in pipeline.process_text("Hello"):
     if event.type == "response":
         print(event.data["text"])
+
+# Process audio input
+await pipeline.handle_audio_chunk(audio_bytes)
+
+# Public methods
+pipeline.cancel_pipeline()           # Cancel current pipeline
+pipeline.set_history(messages)       # Set conversation history
+history = pipeline.get_history()     # Get conversation history
+pipeline.reset()                     # Reset pipeline state
 ```
 
-#### `reset()`
-
-Reset pipeline state and clear buffers.
-
-**Example:**
-```python
-orchestrator.reset()
-```
-
----
-
-## ASRService
-
-Automatic Speech Recognition service.
-
-### Constructor
+### Individual Services
 
 ```python
-ASRService(
-    config: Optional[ASRConfig] = None,
-    use_onnx: bool = True,
-    use_pytorch_cuda: bool = False
-)
-```
+from voice_assistant import get_llm_service, get_tts_service, get_asr_service, get_vad_service
 
-**Parameters:**
-- `config`: ASR configuration
-- `use_onnx`: Use ONNX backend (faster)
-- `use_pytorch_cuda`: Use PyTorch with CUDA
+# LLM
+llm = get_llm_service()
+response = await llm.generate_response("Hello")
+async for token in llm.generate_response_stream("Hello"):
+    print(token)
 
-### Methods
+# TTS
+tts = get_tts_service()
+audio = await tts.synthesize("Xin chào Việt Nam")
 
-#### `transcribe_file(audio_path: str) -> str`
+# ASR
+asr = get_asr_service()
+text = asr.transcribe(audio_array)
 
-Transcribe audio file to text.
-
-**Parameters:**
-- `audio_path`: Path to audio file (WAV, MP3, etc.)
-
-**Returns:**
-- `str`: Transcribed Vietnamese text
-
-**Example:**
-```python
-asr = ASRService()
-text = asr.transcribe_file("audio.wav")
-print(text)
-```
-
-#### `transcribe(audio: np.ndarray, sample_rate: int = 16000) -> str`
-
-Transcribe audio samples to text.
-
-**Parameters:**
-- `audio`: Audio samples (float32, mono, -1.0 to 1.0)
-- `sample_rate`: Sample rate in Hz
-
-**Returns:**
-- `str`: Transcribed text
-
-**Example:**
-```python
-import numpy as np
-
-audio = np.random.randn(16000).astype(np.float32)
-text = asr.transcribe(audio, sample_rate=16000)
-```
-
----
-
-## LLMService
-
-Large Language Model service with streaming.
-
-### Constructor
-
-```python
-LLMService(config: Optional[LLMConfig] = None)
-```
-
-### Methods
-
-#### `generate_response(prompt: str, history: List[Message] = None) -> str`
-
-Generate complete response (non-streaming).
-
-**Parameters:**
-- `prompt`: User query
-- `history`: Conversation history
-
-**Returns:**
-- `str`: Complete response
-
-**Example:**
-```python
-llm = LLMService()
-response = await llm.generate_response("Việt Nam ở đâu?")
-print(response)
-```
-
-#### `generate_response_stream(prompt: str, history: List[Message] = None) -> AsyncIterator[str]`
-
-Stream response sentence by sentence.
-
-**Parameters:**
-- `prompt`: User query
-- `history`: Conversation history
-
-**Yields:**
-- `str`: Response sentences
-
-**Example:**
-```python
-async for sentence in llm.generate_response_stream("Tell me a story"):
-    print(sentence)
-    # Process sentence immediately for TTS
-```
-
----
-
-## TTSService
-
-Text-to-Speech service with multiple backends.
-
-### Constructor
-
-```python
-TTSService(config: Optional[TTSConfig] = None)
-```
-
-### Methods
-
-#### `synthesize(text: str, speaker: str = None) -> bytes`
-
-Synthesize text to speech.
-
-**Parameters:**
-- `text`: Text to synthesize
-- `speaker`: Speaker key (optional)
-
-**Returns:**
-- `bytes`: PCM S16LE audio at target sample rate
-
-**Example:**
-```python
-tts = TTSService()
-audio_bytes = await tts.synthesize("Xin chào Việt Nam")
-
-# Save to file
-with open("output.raw", "wb") as f:
-    f.write(audio_bytes)
-```
-
-#### `synthesize_stream(text: str, speaker: str = None) -> AsyncIterator[bytes]`
-
-Stream synthesis sentence by sentence.
-
-**Parameters:**
-- `text`: Long text to synthesize
-- `speaker`: Speaker key (optional)
-
-**Yields:**
-- `bytes`: Audio chunks
-
-**Example:**
-```python
-long_text = "First sentence. Second sentence. Third sentence."
-async for audio_chunk in tts.synthesize_stream(long_text):
-    # Play chunk immediately
-    play_audio(audio_chunk)
-```
-
----
-
-## VADService
-
-Voice Activity Detection service.
-
-### Constructor
-
-```python
-VADService(config: Optional[VADConfig] = None)
-```
-
-### Methods
-
-#### `process_chunk(audio_chunk: bytes) -> VADResult`
-
-Process audio chunk for speech detection.
-
-**Parameters:**
-- `audio_chunk`: PCM S16LE audio (100ms recommended)
-
-**Returns:**
-- `VADResult`: Detection result with event, confidence, latency
-
-**Example:**
-```python
-vad = VADService()
+# VAD
+vad = get_vad_service()
 result = vad.process_chunk(audio_chunk)
-
-if result.event == "speech_start":
-    print("Speech started!")
-elif result.event == "speech_end":
-    print("Speech ended!")
 ```
 
----
+### Message
 
-## SessionManager
-
-Manage conversation sessions.
-
-### Constructor
+Canonical message class for conversation history.
 
 ```python
-SessionManager(
-    cleanup_interval_s: int = 60,
-    enable_persistence: bool = False
+from voice_assistant import Message
+
+msg = Message(
+    content="Hello",
+    role="user",
+    metadata={"source": "test"}
 )
+
+# Properties
+msg.content      # Message text
+msg.role         # "user" or "assistant"
+msg.timestamp    # Unix timestamp
+msg.metadata     # Custom metadata dict
+msg.to_dict()    # Convert to dict
 ```
 
-### Methods
+### Session
 
-#### `get_or_create_session(session_id: str = None, client_id: str = None) -> Session`
-
-Get existing session or create new one.
-
-**Parameters:**
-- `session_id`: Optional session ID to resume
-- `client_id`: Client identifier
-
-**Returns:**
-- `Session`: Session object
-
-**Example:**
 ```python
+from voice_assistant import Session, SessionManager
+
+# Session manager
 manager = SessionManager()
 session = manager.get_or_create_session()
-print(f"Session ID: {session.id}")
+
+# Session properties
+session.id              # Session ID
+session.history        # Conversation history
+session.state          # ConversationState
+session.is_dirty       # Has unsaved changes
+
+# Session methods
+session.add_message(msg)
+session.clear()
+session.save()          # Save if dirty
 ```
-
-#### `delete_session(session_id: str) -> bool`
-
-Delete a session.
-
-**Parameters:**
-- `session_id`: Session ID
-
-**Returns:**
-- `bool`: True if deleted
-
----
-
-## Configuration
 
 ### Settings
 
-Global settings object loaded from environment variables.
-
 ```python
-from voice_assistant.config import settings
+from voice_assistant import Settings
+
+settings = Settings()
 
 # Access settings
 print(settings.asr.device)
 print(settings.llm.model)
 print(settings.tts.speech_rate)
-
-# Update at runtime
-settings.debug = True
 ```
+
+## Pipeline Events
+
+### Event Types
+
+```python
+# Transcript event
+{"type": "transcript", "data": {"text": "...", "is_final": true}}
+
+# Response event
+{"type": "response", "data": {"text": "...", "is_final": true}}
+
+# Audio event
+{"type": "audio", "data": b"audio_bytes"}
+
+# Control event
+{"type": "control", "data": {"action": "mic_mute"}}
+```
+
+## Configuration
 
 ### Environment Variables
 
-See `.env.example` for all available options.
-
-**Example .env:**
 ```bash
+# Required
 GROQ_API_KEY=your_key
+
+# ASR
 ASR_USE_ONNX=true
+ASR_DEVICE=auto
+
+# TTS
 TTS_BACKEND=auto
 TTS_SPEECH_RATE=1.25
-DEBUG=false
+
+# LLM
+LLM_PROVIDER=groq
+
+# Timeouts
+PIPELINE_ASR_TIMEOUT=10
+PIPELINE_LLM_TIMEOUT=30
+PIPELINE_TTS_TIMEOUT=15
 ```
-
----
-
-## Events
-
-### PipelineEvent
-
-Event emitted by pipeline.
-
-**Attributes:**
-- `type`: Event type ("audio", "transcript", "response", "control")
-- `data`: Event data (varies by type)
-
-**Event Types:**
-
-1. **transcript**
-   ```python
-   {
-       "text": "Transcribed text",
-       "is_final": true,
-       "latency_ms": 500
-   }
-   ```
-
-2. **response**
-   ```python
-   {
-       "text": "AI response",
-       "is_final": true,
-       "latency_ms": 1000
-   }
-   ```
-
-3. **audio**
-   ```python
-   audio_bytes  # PCM S16LE
-   ```
-
-4. **control**
-   ```python
-   {
-       "action": "mic_mute",  # or "mic_unmute", "interrupt"
-   }
-   ```
-
----
-
-## WebSocket Client Messages
-
-### `client_config`
-
-Set client preferences for the WebSocket session.
-
-```json
-{
-  "type": "client_config",
-  "audio_format": "binary"  // "binary" or "base64"
-}
-```
-
-When `audio_format` is `"binary"`, the server sends TTS audio as binary WebSocket frames.
-If omitted, the server defaults to base64-encoded audio in JSON.
-
----
-
-## Utilities
-
-### Text Normalization
-
-```python
-from voice_assistant.utils.text_utils import (
-    normalize_for_tts,
-    clean_vietnamese_text,
-    split_into_sentences
-)
-
-# Normalize for TTS
-text = "**Bold** text with *markdown*"
-clean = normalize_for_tts(text)  # "Bold text with markdown"
-
-# Clean Vietnamese
-text = "TP.HCM là thành phố lớn"
-clean = clean_vietnamese_text(text)  # "thành phố Hồ Chí Minh là thành phố lớn"
-
-# Split sentences
-text = "First. Second! Third?"
-sentences = split_into_sentences(text)  # ["First.", "Second!", "Third?"]
-```
-
-### Logging
-
-```python
-from voice_assistant.utils.logging import logger, latency
-
-# Log messages
-logger.info("Starting process")
-logger.error("Error occurred")
-
-# Track latency
-latency.start("process_time")
-# ... do work ...
-latency.end("process_time")
-
-# Track with context manager
-with latency.track("tts_synthesis"):
-    audio = await tts.synthesize(text)
-
-# Get tracked times
-times = latency.get_all()
-print(times)  # {"process_time": 123, "tts_synthesis": 456}
-```
-
----
 
 ## Error Handling
 
-All async methods may raise:
-
-- `asyncio.TimeoutError`: Operation timed out
-- `ValueError`: Invalid parameters
-- `RuntimeError`: Service initialization failed
-- `ImportError`: Required package not installed
-
-**Example:**
 ```python
 try:
     audio = await tts.synthesize(text)
@@ -479,40 +169,27 @@ except ValueError as e:
     logger.error(f"Invalid input: {e}")
 ```
 
----
-
 ## Best Practices
 
-1. **Use Context Managers**
-   ```python
-   with latency.track("operation"):
-       result = await operation()
-   ```
+1. Use lazy imports for fast startup
+2. Handle timeouts for all async operations
+3. Clean up resources with `pipeline.reset()`
+4. Check `session.is_dirty` before saving
+5. Use `cancel_pipeline()` to stop long operations
 
-2. **Handle Timeouts**
-   ```python
-   try:
-       result = await asyncio.wait_for(operation(), timeout=10)
-   except asyncio.TimeoutError:
-       # Handle timeout
-       pass
-   ```
+## Utilities
 
-3. **Clean Up Resources**
-   ```python
-   orchestrator.reset()
-   session_manager.cleanup_expired()
-   ```
+```python
+from voice_assistant.utils.text_utils import normalize_for_tts, split_into_sentences
+from voice_assistant.utils.logging import logger, latency
 
-4. **Check Session State**
-   ```python
-   if session.state == ConversationState.IDLE:
-       # Process new input
-       pass
-   ```
+# Normalize text
+clean = normalize_for_tts("**Bold** text")
 
-5. **Stream for Long Responses**
-   ```python
-   async for chunk in tts.synthesize_stream(long_text):
-       await play_audio(chunk)
-   ```
+# Split sentences
+sentences = split_into_sentences("First. Second.")
+
+# Track latency
+with latency.track("tts"):
+    audio = await tts.synthesize(text)
+```
