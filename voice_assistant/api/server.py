@@ -142,6 +142,8 @@ async def shutdown():
 class ConnectionManager:
     """Manage WebSocket connections with sessions."""
 
+    MAX_CONNECTIONS = 50
+
     def __init__(self):
         self.connections: Dict[str, WebSocket] = {}
         self.orchestrators: Dict[str, PipelineOrchestrator] = {}
@@ -152,7 +154,13 @@ class ConnectionManager:
         websocket: WebSocket,
         client_id: str,
         session: Session,
-    ) -> PipelineOrchestrator:
+    ) -> Optional[PipelineOrchestrator]:
+        # Reject if at capacity
+        if len(self.connections) >= self.MAX_CONNECTIONS:
+            logger.warning(f"Connection rejected: at capacity ({self.MAX_CONNECTIONS})")
+            await websocket.close(code=1013, reason="Server at capacity")
+            return None
+
         await websocket.accept()
         self.connections[client_id] = websocket
         self.audio_formats[client_id] = "base64"
@@ -395,6 +403,8 @@ async def websocket_endpoint(
 
     # Connect and get orchestrator
     orchestrator = await manager.connect(websocket, client_id, session)
+    if orchestrator is None:
+        return  # Connection rejected
 
     # Send session info to client
     await manager.send_json(client_id, {
