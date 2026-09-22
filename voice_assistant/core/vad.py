@@ -4,6 +4,7 @@ Streaming-optimized with VADIterator.
 """
 
 import asyncio
+import concurrent.futures
 import time
 from dataclasses import dataclass
 from typing import Optional, Literal
@@ -46,6 +47,7 @@ class VADService:
         self._is_speech_active = False
         self._speech_chunks = 0
         self._silence_chunks = 0
+        self._executor: Optional[concurrent.futures.ThreadPoolExecutor] = None
 
     def _ensure_loaded(self):
         """Lazy load Silero VAD model."""
@@ -164,8 +166,13 @@ class VADService:
         )
 
     async def process_chunk_async(self, audio_data: bytes) -> VADResult:
-        """Async wrapper for process_chunk."""
-        return await asyncio.to_thread(self.process_chunk, audio_data)
+        """Async wrapper for process_chunk using a persistent thread pool."""
+        if self._executor is None:
+            self._executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="vad-worker"
+            )
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(self._executor, self.process_chunk, audio_data)
 
     @property
     def is_speech_active(self) -> bool:
